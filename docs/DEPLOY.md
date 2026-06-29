@@ -49,3 +49,17 @@ Copy or merge:
 - `AGENTS.md` short safety rules;
 - `opencode/opencode.json` into your OpenCode config;
 - `opencode/skills/*` into either project `.opencode/skills/` or global `~/.config/opencode/skills/`.
+
+
+## Portable adapter usage
+
+All adapters are invoked through the same `safe` CLI on Windows, Linux, macOS, and Android/Termux. Avoid PowerShell-only wrappers in project instructions; keep PowerShell shell scripts only as optional convenience launchers.
+
+Examples:
+
+```bash
+safe git-checkpoint --reason "before risky change" --bundle
+safe ssh-relay-readonly --relay "ssh_relay" --host-label "server" --remote-command "pwd"
+safe yc-readonly -- compute instance list
+safe system-readonly -- hostname
+```

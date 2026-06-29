@@ -43,3 +43,15 @@ High-risk actions must use explicit targets. Avoid aliases, wildcards, pipelines
 Unexpected result after a high-risk action is an incident, not an obstacle.
 
 The original task stops. Only read-only diagnostics and recovery planning are allowed until the situation is understood and a recovery plan is approved.
+
+
+## Adapter rule
+
+Adapters are convenience wrappers, not exceptions to the protocol. A new subsystem does not become safe because it is absent from the known adapter list. If no adapter exists, use the generic execution adapter and classify the action by effect:
+
+```text
+read-only inspection -> safe exec-readonly
+state-changing or unclear -> safe exec-risky
+unclear consequences or rollback -> stop
+unexpected result -> recovery mode
+```

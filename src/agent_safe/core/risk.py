@@ -9,7 +9,7 @@ from .models import Assessment, Knowledge, Predictability, Reversibility, Risk
 READ_ONLY_VERBS = {
     "cat", "type", "more", "less", "head", "tail", "ls", "dir", "pwd", "whoami", "hostname",
     "get", "show", "list", "describe", "status", "diff", "log", "grep", "find", "where",
-    "test-path", "select", "explain", "plan", "dry-run", "whatif", "version", "help", "--help", "-h"
+    "test-path", "select", "explain", "plan", "dry-run", "whatif", "version", "--version", "help", "--help", "-h"
 }
 
 STATE_CHANGING_VERBS = {
@@ -56,6 +56,12 @@ def assess_command(command: str, channel: str = "unknown") -> Assessment:
 
     if not text:
         return Assessment(command=command, channel=channel, state_changing=False, risk=Risk.SAFE, knowledge=Knowledge.HIGH, predictability=Predictability.DETERMINISTIC, reversibility=Reversibility.AUTOMATIC, reasons=["empty command"], required_next_step="none")
+
+
+    # Explicit safe previews for otherwise dangerous tools.
+    # These commands inspect planned effects without changing state.
+    if re.search(r"\bgit\s+clean\s+-[^\n]*n", text, re.IGNORECASE) or re.search(r"\bgit\s+clean\s+--dry-run\b", text, re.IGNORECASE):
+        return Assessment(command=command, channel=channel, domain="git", operation="clean-preview", risk=Risk.SAFE, knowledge=Knowledge.HIGH, predictability=Predictability.DETERMINISTIC, reversibility=Reversibility.AUTOMATIC, state_changing=False, reasons=["git clean preview/dry-run"], required_next_step="execute-read-only")
 
     if any(re.search(pattern, text, re.IGNORECASE) for pattern in CRITICAL_PATTERNS):
         reasons.append("matches known critical/destructive pattern")

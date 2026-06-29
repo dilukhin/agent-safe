@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .adapters.exec_adapter import exec_readonly, exec_risky
 from .adapters.fs import SafetyError, fs_move, fs_trash, redo_record, undo_record
+from .adapters.git import git_checkpoint, git_clean_preview
+from .adapters.ssh_relay import ssh_relay_readonly, ssh_relay_risky
+from .adapters.system import system_change, system_readonly
+from .adapters.yc import yc_change, yc_readonly
 from .core.checkpoint import checkpoint as make_checkpoint
 from .core.journal import Journal
 from .core.risk import assess_command
@@ -14,6 +19,20 @@ from .core.risk import assess_command
 
 def print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+
+def _remainder(values: list[str]) -> list[str]:
+    if values and values[0] == "--":
+        return values[1:]
+    return values
+
+
+def _require_command(values: list[str]) -> list[str]:
+    command = _remainder(values)
+    if not command:
+        raise SafetyError("command is required after --")
+    return command
 
 
 def cmd_assess(args: argparse.Namespace) -> int:
@@ -74,6 +93,128 @@ def cmd_redo(args: argparse.Namespace) -> int:
         raise SafetyError(f"transaction not found: {args.txn_id}")
     print_json(redo_record(rec, journal))
     return 0
+
+
+
+def cmd_exec_readonly(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = exec_readonly(
+        _require_command(args.exec_command),
+        journal=journal,
+        channel=args.channel,
+        domain=args.domain,
+        reason=args.reason,
+        timeout=args.timeout,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_exec_risky(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = exec_risky(
+        _require_command(args.exec_command),
+        journal=journal,
+        channel=args.channel,
+        domain=args.domain,
+        target=args.target,
+        reason=args.reason,
+        expected_state_json=args.expected_state,
+        rollback_command=args.rollback_command,
+        verify_command=args.verify_command,
+        approved=args.approved,
+        allow_critical=args.allow_critical,
+        timeout=args.timeout,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_git_checkpoint(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = git_checkpoint(journal, args.reason, create_bundle=args.bundle)
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_git_clean_preview(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = git_clean_preview(journal, include_ignored=args.include_ignored)
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_ssh_relay_readonly(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = ssh_relay_readonly(args.relay, args.remote_command, journal=journal, host_label=args.host_label, reason=args.reason)
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_ssh_relay_risky(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = ssh_relay_risky(
+        args.relay,
+        args.remote_command,
+        journal=journal,
+        host_label=args.host_label,
+        reason=args.reason,
+        expected_state_json=args.expected_state,
+        rollback_command=args.rollback_command,
+        verify_remote_command=args.verify_remote_command,
+        approved=args.approved,
+        allow_critical=args.allow_critical,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_yc_readonly(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = yc_readonly(_remainder(args.yc_args), journal=journal, reason=args.reason)
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_yc_change(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = yc_change(
+        _require_command(args.yc_args),
+        journal=journal,
+        target=args.target,
+        reason=args.reason,
+        expected_state_json=args.expected_state,
+        rollback_command=args.rollback_command,
+        verify_command=args.verify_command,
+        approved=args.approved,
+        allow_critical=args.allow_critical,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_system_readonly(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = system_readonly(_require_command(args.exec_command), journal=journal, reason=args.reason)
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_system_change(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = system_change(
+        _require_command(args.exec_command),
+        journal=journal,
+        target=args.target,
+        reason=args.reason,
+        expected_state_json=args.expected_state,
+        rollback_command=args.rollback_command,
+        verify_command=args.verify_command,
+        approved=args.approved,
+        allow_critical=args.allow_critical,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
@@ -151,6 +292,88 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("redo", help="Redo a reversible transaction")
     p.add_argument("txn_id", nargs="?", default="last")
     p.set_defaults(func=cmd_redo)
+
+    p = sub.add_parser("exec-readonly", help="Execute a read-only command through the safety journal")
+    p.add_argument("--channel", default="unknown")
+    p.add_argument("--domain", default="unknown")
+    p.add_argument("--reason", default="read-only inspection")
+    p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
+    p.set_defaults(func=cmd_exec_readonly)
+
+    p = sub.add_parser("exec-risky", help="Execute one approved risky command with expected state and rollback")
+    p.add_argument("--channel", default="unknown")
+    p.add_argument("--domain", default="unknown")
+    p.add_argument("--target", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--expected-state", required=True, help="JSON object describing expected post-state")
+    p.add_argument("--rollback-command", required=True)
+    p.add_argument("--verify-command")
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
+    p.set_defaults(func=cmd_exec_risky)
+
+    p = sub.add_parser("git-checkpoint", help="Create git evidence checkpoint and optional bundle")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--bundle", action="store_true", help="also run git bundle create --all")
+    p.set_defaults(func=cmd_git_checkpoint)
+
+    p = sub.add_parser("git-clean-preview", help="Run git clean dry-run only")
+    p.add_argument("--include-ignored", action="store_true", help="use git clean -ndx")
+    p.set_defaults(func=cmd_git_clean_preview)
+
+    p = sub.add_parser("ssh-relay-readonly", help="Run a read-only command via an ssh_relay-compatible CLI")
+    p.add_argument("--relay", required=True, help="relay command, e.g. ssh_relay or 'python ssh_relay.py'")
+    p.add_argument("--host-label", required=True)
+    p.add_argument("--remote-command", required=True)
+    p.add_argument("--reason", default="read-only ssh_relay inspection")
+    p.set_defaults(func=cmd_ssh_relay_readonly)
+
+    p = sub.add_parser("ssh-relay-risky", help="Run one approved risky remote command via ssh_relay-compatible CLI")
+    p.add_argument("--relay", required=True)
+    p.add_argument("--host-label", required=True)
+    p.add_argument("--remote-command", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--expected-state", required=True)
+    p.add_argument("--rollback-command", required=True)
+    p.add_argument("--verify-remote-command")
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.set_defaults(func=cmd_ssh_relay_risky)
+
+    p = sub.add_parser("yc-readonly", help="Run read-only yc command")
+    p.add_argument("--reason", default="read-only yc inspection")
+    p.add_argument("yc_args", nargs=argparse.REMAINDER, help="yc args after --")
+    p.set_defaults(func=cmd_yc_readonly)
+
+    p = sub.add_parser("yc-change", help="Run one approved yc change command with rollback metadata")
+    p.add_argument("--target", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--expected-state", required=True)
+    p.add_argument("--rollback-command", required=True)
+    p.add_argument("--verify-command")
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.add_argument("yc_args", nargs=argparse.REMAINDER, help="yc args after --")
+    p.set_defaults(func=cmd_yc_change)
+
+    p = sub.add_parser("system-readonly", help="Run a read-only system/VM command")
+    p.add_argument("--reason", default="read-only system inspection")
+    p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
+    p.set_defaults(func=cmd_system_readonly)
+
+    p = sub.add_parser("system-change", help="Run one approved system/VM change command")
+    p.add_argument("--target", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--expected-state", required=True)
+    p.add_argument("--rollback-command", required=True)
+    p.add_argument("--verify-command")
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
+    p.set_defaults(func=cmd_system_change)
 
     p = sub.add_parser("diagnose", help="Read-only incident diagnostics")
     p.set_defaults(func=cmd_diagnose)
