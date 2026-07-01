@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-safe"
-version = "0.2.1"
+version = "0.3.0"
 description = "Cross-platform safety runtime for CLI agents"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -16,6 +16,9 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = []
+
+[tool.setuptools.package-data]
+agent_safe = ["templates/opencode/opencode.json", "templates/opencode/skills/*/SKILL.md"]
 
 [project.scripts]
 safe = "agent_safe.cli:main"
