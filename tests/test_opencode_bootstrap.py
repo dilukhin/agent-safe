@@ -63,6 +63,39 @@ class OpenCodeBootstrapTests(unittest.TestCase):
             self.assertEqual(config["permission"]["bash"]["safe *"], "allow")
             self.assertEqual(config["permission"]["edit"], "deny")
 
+    def test_opencode_bootstrap_second_apply_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self.run_safe(root, "opencode-bootstrap", "--scope", "project", "--apply")
+            self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+            journal = root / ".agent-safety" / "actions.jsonl"
+            before = journal.read_text(encoding="utf-8")
+
+            second = self.run_safe(root, "opencode-bootstrap", "--scope", "project", "--apply")
+            self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+            payload = json.loads(second.stdout)
+            self.assertEqual(payload["planned_changes"], [])
+            self.assertIs(payload["applied"], False)
+            self.assertIsNone(payload["journal_txn_id"])
+            self.assertEqual(journal.read_text(encoding="utf-8"), before)
+
+    def test_opencode_bootstrap_generates_extended_bash_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = self.run_safe(root, "opencode-bootstrap", "--scope", "project", "--apply", "--no-agents", "--no-skills")
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
+            bash = config["permission"]["bash"]
+            self.assertEqual(config["permission"]["edit"], "ask")
+            for key in [
+                "erase *",
+                "shutdown *",
+                "Restart-Computer *",
+                "Stop-Computer *",
+                "wget *|*sh*",
+            ]:
+                self.assertEqual(bash[key], "deny")
+
 
 if __name__ == "__main__":
     unittest.main()
