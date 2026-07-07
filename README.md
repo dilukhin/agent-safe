@@ -41,6 +41,7 @@ AI-агенты и CLI-ассистенты хорошо автоматизир�
 - system/VM adapter для системных команд и операций с сервисами;
 - пример OpenCode permissions;
 - OpenCode skills, которые можно загружать on demand;
+- `safe opencode-bootstrap` для автоматического подключения к OpenCode;
 - тесты на Python `unittest` без внешних зависимостей.
 
 Планируемые направления:
@@ -69,7 +70,7 @@ AI-агенты и CLI-ассистенты хорошо автоматизир�
 ### Из исходников
 
 ```bash
-git clone <repo-url> agent-safe
+git clone https://github.com/dilukhin/agent-safe.git agent-safe
 cd agent-safe
 python -m pip install -e .
 safe --help
@@ -198,6 +199,40 @@ safe redo last
 safe diagnose
 safe recovery-plan
 ```
+
+
+## Подключение к OpenCode одной командой
+
+После установки `safe` можно подключить agent-safe к OpenCode без ручного копирования skills и config.
+
+Сначала dry-run:
+
+```bash
+safe opencode-bootstrap --scope global --dry-run
+```
+
+Если diff выглядит нормально, применить:
+
+```bash
+safe opencode-bootstrap --scope global --apply
+```
+
+Для проектной установки из корня репозитория:
+
+```bash
+safe opencode-bootstrap --scope project --dry-run
+safe opencode-bootstrap --scope project --apply
+```
+
+Команда делает три вещи:
+
+- создаёт/обновляет `opencode.json` с осторожными permissions;
+- копирует agent-safe skills;
+- добавляет короткий блок Agent Safety в `AGENTS.md`.
+
+`--dry-run` ничего не меняет. `--apply` перед изменениями делает backup существующих файлов в `.agent-safety/snapshots/` и записывает транзакцию `opencode.bootstrap` в журнал только если были реальные изменения.
+
+Подробности: [`docs/OPENCODE_BOOTSTRAP.md`](docs/OPENCODE_BOOTSTRAP.md).
 
 ## Модель безопасности
 
@@ -484,11 +519,26 @@ safe clear-block --reason "manual recovery completed and verified"
 
 ## Интеграция с OpenCode
 
-Проект содержит пример конфигурации:
+Проект содержит пример конфигурации и встроенные шаблоны:
 
 ```text
 opencode/opencode.json
 opencode/skills/
+src/agent_safe/templates/opencode/
+```
+
+Рекомендуемый способ подключения — команда bootstrap:
+
+```bash
+safe opencode-bootstrap --scope global --dry-run
+safe opencode-bootstrap --scope global --apply
+```
+
+Для конкретного проекта:
+
+```bash
+safe opencode-bootstrap --scope project --dry-run
+safe opencode-bootstrap --scope project --apply
 ```
 
 Рекомендуемый подход:
@@ -566,10 +616,16 @@ agent-safe/
       ssh_relay.py
       system.py
       yc.py
+    templates/
+      opencode/
+        opencode.json
+        skills/
+    opencode_bootstrap.py
   tests/
   docs/
     ADAPTERS.md
     DEPLOY.md
+    OPENCODE_BOOTSTRAP.md
     UNIVERSAL_ACTION_SAFETY.md
   opencode/
     opencode.json

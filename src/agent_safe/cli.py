@@ -15,6 +15,7 @@ from .adapters.yc import yc_change, yc_readonly
 from .core.checkpoint import checkpoint as make_checkpoint
 from .core.journal import Journal
 from .core.risk import assess_command
+from .opencode_bootstrap import opencode_bootstrap
 
 
 def print_json(payload: object) -> None:
@@ -217,6 +218,25 @@ def cmd_system_change(args: argparse.Namespace) -> int:
     return 0 if record.status.value == "done" else 3
 
 
+def cmd_opencode_bootstrap(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    result = opencode_bootstrap(
+        scope=args.scope,
+        apply=args.apply,
+        root=journal.root,
+        opencode_dir=args.opencode_dir,
+        config_path=args.config_path,
+        skills_dir=args.skills_dir,
+        agents_path=args.agents_path,
+        update_agents=not args.no_agents,
+        update_config=not args.no_config,
+        copy_skills=not args.no_skills,
+        journal=journal,
+    )
+    print_json(result.to_dict())
+    return 0
+
+
 def cmd_diagnose(args: argparse.Namespace) -> int:
     journal = Journal(Path(args.root) if args.root else None)
     payload = {
@@ -374,6 +394,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-critical", action="store_true")
     p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
     p.set_defaults(func=cmd_system_change)
+
+
+    p = sub.add_parser("opencode-bootstrap", help="Install/update agent-safe OpenCode skills, permissions and AGENTS.md block")
+    p.add_argument("--scope", choices=["global", "project"], default="global", help="global ~/.config/opencode or project-local config")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="show planned changes without writing files")
+    mode.add_argument("--apply", action="store_true", help="apply planned changes and record a journal entry")
+    p.add_argument("--opencode-dir", help="override OpenCode config/base directory")
+    p.add_argument("--config-path", help="override opencode.json path")
+    p.add_argument("--skills-dir", help="override skills directory")
+    p.add_argument("--agents-path", help="override AGENTS.md path")
+    p.add_argument("--no-agents", action="store_true", help="do not create/update AGENTS.md")
+    p.add_argument("--no-config", action="store_true", help="do not create/update opencode.json")
+    p.add_argument("--no-skills", action="store_true", help="do not copy OpenCode skills")
+    p.set_defaults(func=cmd_opencode_bootstrap)
 
     p = sub.add_parser("diagnose", help="Read-only incident diagnostics")
     p.set_defaults(func=cmd_diagnose)

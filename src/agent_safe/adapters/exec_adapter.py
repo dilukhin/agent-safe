@@ -46,14 +46,22 @@ def _loads_json_object(text: str | None, name: str) -> dict[str, Any]:
     return value
 
 
+def _unquote_windows_token(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+        return token[1:-1]
+    return token
+
+
 def _split_shell_command(text: str | None) -> list[str] | None:
     if not text:
         return None
     try:
-        return shlex.split(text, posix=(not _looks_windows_command(text)))
+        args = shlex.split(text, posix=(not _looks_windows_command(text)))
     except ValueError as exc:
         raise SafetyError(f"cannot parse command: {text}: {exc}") from exc
-
+    if _looks_windows_command(text):
+        return [_unquote_windows_token(arg) for arg in args]
+    return args
 
 def _looks_windows_command(text: str) -> bool:
     return "\\" in text or ".exe" in text.lower() or ".cmd" in text.lower() or ".bat" in text.lower()

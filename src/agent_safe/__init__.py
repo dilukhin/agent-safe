@@ -1,3 +1,3 @@
 """agent-safe: cross-platform safety runtime for CLI agents."""
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

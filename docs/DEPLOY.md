@@ -44,11 +44,25 @@ python safe.pyz --help
 
 ## OpenCode
 
-Copy or merge:
+Recommended bootstrap:
 
-- `AGENTS.md` short safety rules;
-- `opencode/opencode.json` into your OpenCode config;
-- `opencode/skills/*` into either project `.opencode/skills/` or global `~/.config/opencode/skills/`.
+```bash
+safe opencode-bootstrap --scope global --dry-run
+safe opencode-bootstrap --scope global --apply
+```
+
+For project-local setup from the repository root:
+
+```bash
+safe opencode-bootstrap --scope project --dry-run
+safe opencode-bootstrap --scope project --apply
+```
+
+Manual alternative:
+
+- copy or merge `AGENTS.md` short safety rules;
+- merge `opencode/opencode.json` into your OpenCode config;
+- copy `opencode/skills/*` into either project `.opencode/skills/` or global `~/.config/opencode/skills/`.
 
 
 ## Portable adapter usage
