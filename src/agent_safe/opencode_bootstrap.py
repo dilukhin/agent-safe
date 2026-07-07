@@ -50,6 +50,7 @@ DEFAULT_BASH_RULES: dict[str, str] = {
     "rm *": "deny",
     "rmdir *": "deny",
     "del *": "deny",
+    "erase *": "deny",
     "Remove-Item *": "deny",
     "git reset --hard*": "deny",
     "git clean -f*": "deny",
@@ -58,7 +59,11 @@ DEFAULT_BASH_RULES: dict[str, str] = {
     "git push --force*": "deny",
     "yc * delete *": "deny",
     "yc * remove *": "deny",
+    "shutdown *": "deny",
+    "Restart-Computer *": "deny",
+    "Stop-Computer *": "deny",
     "curl *|*sh*": "deny",
+    "wget *|*sh*": "deny",
     "iwr *|*iex*": "deny",
     "Invoke-Expression *": "deny",
     "iex *": "deny",
@@ -386,6 +391,11 @@ def opencode_bootstrap(
                     rollback_commands.append(f"restore backup {b} -> {agents}")
                 agents.parent.mkdir(parents=True, exist_ok=True)
                 agents.write_text(new_text, encoding="utf-8")
+
+    if apply and not result.planned_changes:
+        result.applied = False
+        result.journal_txn_id = None
+        return result
 
     if apply:
         record = ActionRecord(
