@@ -62,6 +62,30 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(rec.status.value, "unexpected")
             self.assertTrue(journal.is_blocked())
 
+    def test_exec_risky_runs_receipt_after_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            changed = root / "changed.txt"
+            receipt = root / "receipt.txt"
+            journal = Journal(root)
+            rec = exec_risky(
+                [sys.executable, "-c", f"from pathlib import Path; Path({str(changed)!r}).write_text('changed')"],
+                journal=journal,
+                channel="local",
+                domain="fs",
+                target=str(changed),
+                reason="test receipt",
+                expected_state_json=json.dumps({"changed": True, "receipt": True}),
+                rollback_command="manual cleanup",
+                receipt_command=f"{sys.executable} -c \"from pathlib import Path; Path({str(receipt)!r}).write_text('receipt')\"",
+                approved=True,
+            )
+            self.assertEqual(rec.status.value, "done")
+            self.assertTrue(changed.exists())
+            self.assertTrue(receipt.exists())
+            self.assertEqual(rec.verify_result["receipt_returncode"], 0)
+            self.assertIsNotNone(rec.metadata["receipt_exec"])
+
     def test_git_clean_preview_command_is_allowed_in_git_repo(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -73,6 +97,28 @@ class AdapterTests(unittest.TestCase):
 
     def test_ssh_relay_builds_command(self):
         self.assertEqual(build_relay_command("ssh_relay", "pwd"), ["ssh_relay", "exec", "pwd"])
+
+    def test_ssh_relay_builds_named_risky_command(self):
+        self.assertEqual(
+            build_relay_command(
+                "py ssh_relay.py",
+                "touch /tmp/x",
+                relay_name="prod",
+                risky=True,
+                receipt_path="~/.local/state/agent-safe/changes.jsonl",
+            ),
+            [
+                "py",
+                "ssh_relay.py",
+                "exec",
+                "--name",
+                "prod",
+                "--risky",
+                "--receipt-path",
+                "~/.local/state/agent-safe/changes.jsonl",
+                "touch /tmp/x",
+            ],
+        )
 
     def test_ssh_relay_readonly_rejects_remote_mutation(self):
         with tempfile.TemporaryDirectory() as td:

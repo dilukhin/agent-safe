@@ -120,6 +120,7 @@ def exec_risky(
     expected_state_json: str,
     rollback_command: str,
     verify_command: str | None = None,
+    receipt_command: str | None = None,
     approved: bool = False,
     allow_critical: bool = False,
     cwd: Path | None = None,
@@ -145,16 +146,26 @@ def exec_risky(
         raise SafetyError("command appears read-only; use exec-readonly instead")
 
     verify_args = _split_shell_command(verify_command)
+    receipt_args = _split_shell_command(receipt_command)
     txn_id = ActionRecord.new_id()
     result = _run(command, cwd, timeout=timeout)
     verify_result: dict[str, Any] = {"command_returncode": result.get("returncode")}
     verify_exec: dict[str, Any] | None = None
-    if verify_args:
+    if result.get("returncode") == 0 and verify_args:
         verify_exec = _run(verify_args, cwd, timeout=timeout)
         verify_result["verify_returncode"] = verify_exec.get("returncode")
         verify_result["verify_display"] = verify_exec.get("display")
+    receipt_exec: dict[str, Any] | None = None
+    if result.get("returncode") == 0 and (verify_exec is None or verify_exec.get("returncode") == 0) and receipt_args:
+        receipt_exec = _run(receipt_args, cwd, timeout=timeout)
+        verify_result["receipt_returncode"] = receipt_exec.get("returncode")
+        verify_result["receipt_display"] = receipt_exec.get("display")
 
-    ok = result.get("returncode") == 0 and (verify_exec is None or verify_exec.get("returncode") == 0)
+    ok = (
+        result.get("returncode") == 0
+        and (verify_exec is None or verify_exec.get("returncode") == 0)
+        and (receipt_exec is None or receipt_exec.get("returncode") == 0)
+    )
     status = Status.DONE if ok else Status.UNEXPECTED
     record = ActionRecord(
         txn_id=txn_id,
@@ -169,7 +180,7 @@ def exec_risky(
         redo={"op": "manual-command", "command": command_text},
         expected_state=expected_state,
         verify_result=verify_result,
-        metadata={"assessment": assessment.to_dict(), "result": result, "verify_exec": verify_exec},
+        metadata={"assessment": assessment.to_dict(), "result": result, "verify_exec": verify_exec, "receipt_exec": receipt_exec},
     )
     journal.append(record)
     if status == Status.UNEXPECTED:

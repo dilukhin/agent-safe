@@ -23,6 +23,41 @@ class CliTests(unittest.TestCase):
             data = json.loads(proc.stdout)
             self.assertFalse(data["blocked"])
 
+    def test_exec_risky_accepts_expected_state_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            expected = root / "expected.json"
+            expected.write_text('{"ok":true}', encoding="utf-8")
+            proc = self.run_cli(
+                "--root", td,
+                "exec-risky",
+                "--channel", "local",
+                "--domain", "unknown",
+                "--target", "test-target",
+                "--reason", "test file args",
+                "--expected-state-file", str(expected),
+                "--rollback-command", "manual rollback",
+                "--approved",
+                "--", sys.executable, "-c", "print('changed')",
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+            self.assertEqual(data["expected_state"], {"ok": True})
+
+    def test_receipt_command_prints_posix_jsonl_append(self):
+        proc = self.run_cli(
+            "receipt-command",
+            "--format", "posix",
+            "--path", "~/.local/state/agent-safe/changes.jsonl",
+            "--change", "install package",
+            "--target", "host:prod",
+            "--field", "package=nginx",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"$HOME"/', proc.stdout)
+        self.assertIn('"change":"install package"', proc.stdout)
+        self.assertIn('"package":"nginx"', proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
