@@ -171,9 +171,55 @@ safe exec-risky \
   --expected-state '{"state":"expected"}' \
   --rollback-command "exact rollback command" \
   --verify-command "exact verification command" \
+  --receipt-command "optional command that records the completed change on the target side" \
   --approved \
   -- command arg1 arg2
 ```
+
+On Windows/PowerShell, prefer file arguments for JSON and nested commands:
+
+```powershell
+safe exec-risky `
+  --channel remote `
+  --domain system `
+  --target "host:path-or-resource" `
+  --reason "approved remote change" `
+  --expected-state-file .\expected-state.json `
+  --rollback-command-file .\rollback.txt `
+  --verify-command-file .\verify.txt `
+  --receipt-command-file .\receipt.txt `
+  --approved `
+  -- command arg1 arg2
+```
+
+`--receipt-command` runs only after the main command and optional verify command succeed. Use it to write an audit receipt on the changed host, for example append JSONL to `C:\ProgramData\agent-safe\changes.jsonl` during remote maintenance.
+
+Generate a receipt command instead of hand-writing nested quoting:
+
+```bash
+safe receipt-command \
+  --format posix \
+  --path ~/.local/state/agent-safe/changes.jsonl \
+  --change "install package" \
+  --target "host:prod" \
+  --field package=nginx > receipt.txt
+```
+
+For Linux hosts via `ssh_relay`, store the receipt on the remote host with `--receipt-path`:
+
+```bash
+safe ssh-relay-risky \
+  --relay "py ssh_relay.py" \
+  --relay-name prod \
+  --host-label prod \
+  --remote-command "sudo -n apt-get install -y nginx" \
+  --expected-state-file expected-state.json \
+  --rollback-command-file rollback.txt \
+  --receipt-path ~/.local/state/agent-safe/changes.jsonl \
+  --approved
+```
+
+`ssh-relay-risky` passes `--risky` to compatible `ssh_relay.py`, so the relay writes the remote receipt after the command succeeds. `--receipt-remote-command` remains available for older/custom transports or additional audit actions.
 
 Посмотреть состояние safety-журнала:
 
