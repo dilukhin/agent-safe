@@ -670,6 +670,7 @@ agent-safe/
   tests/
   docs/
     ADAPTERS.md
+    ANDROID_TERMUX_FINDINGS.md
     DEPLOY.md
     OPENCODE_BOOTSTRAP.md
     UNIVERSAL_ACTION_SAFETY.md
