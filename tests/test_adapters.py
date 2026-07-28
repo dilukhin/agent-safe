@@ -1,4 +1,6 @@
 import json
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -13,11 +15,23 @@ from agent_safe.adapters.yc import yc_change
 from agent_safe.core.journal import Journal
 
 
+def command_text(*args: str) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return shlex.join(args)
+
+
 class AdapterTests(unittest.TestCase):
     def test_exec_readonly_runs_readonly_command(self):
         with tempfile.TemporaryDirectory() as td:
             journal = Journal(Path(td))
-            rec = exec_readonly([sys.executable, "--version"], journal=journal, channel="local", domain="system", reason="version check")
+            rec = exec_readonly(
+                [sys.executable, "--version"],
+                journal=journal,
+                channel="local",
+                domain="system",
+                reason="version check",
+            )
             self.assertEqual(rec.status.value, "done")
             self.assertEqual(rec.risk.value, "safe")
 
@@ -25,7 +39,13 @@ class AdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             journal = Journal(Path(td))
             with self.assertRaises(SafetyError):
-                exec_readonly(["rm", "-rf", "x"], journal=journal, channel="local", domain="fs", reason="bad")
+                exec_readonly(
+                    ["rm", "-rf", "x"],
+                    journal=journal,
+                    channel="local",
+                    domain="fs",
+                    reason="bad",
+                )
 
     def test_exec_risky_requires_approval(self):
         with tempfile.TemporaryDirectory() as td:
@@ -38,7 +58,10 @@ class AdapterTests(unittest.TestCase):
                     domain="unknown",
                     target="test-target",
                     reason="test",
-                    expected_state_json=json.dumps({"ok": True}),
+                    expected_state_json=json.dumps({
+                        "assertions": {"ok": True},
+                        "declarations": {},
+                    }),
                     rollback_command="echo rollback",
                     approved=False,
                 )
@@ -46,6 +69,8 @@ class AdapterTests(unittest.TestCase):
     def test_exec_risky_blocks_after_unexpected_verify(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            verify = root / "verify.py"
+            verify.write_text("raise SystemExit(1)\n", encoding="utf-8")
             journal = Journal(root)
             rec = exec_risky(
                 [sys.executable, "-c", "print('changed')"],
@@ -54,9 +79,12 @@ class AdapterTests(unittest.TestCase):
                 domain="unknown",
                 target="test-target",
                 reason="test unexpected",
-                expected_state_json=json.dumps({"marker_exists": True}),
+                expected_state_json=json.dumps({
+                    "assertions": {"marker_exists": True},
+                    "declarations": {},
+                }),
                 rollback_command="echo rollback",
-                verify_command=f"{sys.executable} -c \"import sys; sys.exit(1)\"",
+                verify_command=command_text(sys.executable, str(verify)),
                 approved=True,
             )
             self.assertEqual(rec.status.value, "unexpected")
@@ -67,17 +95,34 @@ class AdapterTests(unittest.TestCase):
             root = Path(td)
             changed = root / "changed.txt"
             receipt = root / "receipt.txt"
+            verify = root / "verify.py"
+            verify.write_text(
+                "import json\nprint(json.dumps({'changed': True}))\n",
+                encoding="utf-8",
+            )
             journal = Journal(root)
             rec = exec_risky(
-                [sys.executable, "-c", f"from pathlib import Path; Path({str(changed)!r}).write_text('changed')"],
+                [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(changed)!r}).write_text('changed')",
+                ],
                 journal=journal,
                 channel="local",
                 domain="fs",
                 target=str(changed),
                 reason="test receipt",
-                expected_state_json=json.dumps({"changed": True, "receipt": True}),
+                expected_state_json=json.dumps({
+                    "assertions": {"changed": True},
+                    "declarations": {"receipt": "audit"},
+                }),
                 rollback_command="manual cleanup",
-                receipt_command=f"{sys.executable} -c \"from pathlib import Path; Path({str(receipt)!r}).write_text('receipt')\"",
+                verify_command=command_text(sys.executable, str(verify)),
+                receipt_command=command_text(
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(receipt)!r}).write_text('receipt')",
+                ),
                 approved=True,
             )
             self.assertEqual(rec.status.value, "done")
@@ -124,7 +169,13 @@ class AdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             journal = Journal(Path(td))
             with self.assertRaises(SafetyError):
-                ssh_relay_readonly("ssh_relay", "rm -rf /tmp/x", journal=journal, host_label="test", reason="bad")
+                ssh_relay_readonly(
+                    "ssh_relay",
+                    "rm -rf /tmp/x",
+                    journal=journal,
+                    host_label="test",
+                    reason="bad",
+                )
 
     def test_yc_change_requires_approval_before_yc_is_invoked(self):
         with tempfile.TemporaryDirectory() as td:
@@ -135,7 +186,10 @@ class AdapterTests(unittest.TestCase):
                     journal=journal,
                     target="compute.instance:abc",
                     reason="test",
-                    expected_state_json=json.dumps({"status": "STOPPED"}),
+                    expected_state_json=json.dumps({
+                        "assertions": {"status": "STOPPED"},
+                        "declarations": {},
+                    }),
                     rollback_command="yc compute instance start --id abc",
                     verify_command=None,
                     approved=False,

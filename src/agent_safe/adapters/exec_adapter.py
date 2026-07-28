@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shlex
 import subprocess
 from pathlib import Path
@@ -10,6 +9,13 @@ from agent_safe.adapters.fs import SafetyError
 from agent_safe.core.journal import Journal
 from agent_safe.core.models import ActionRecord, Risk, Status
 from agent_safe.core.risk import assess_command
+from agent_safe.core.verification import (
+    VerificationError,
+    VerificationOutcome,
+    failed_verification,
+    parse_expected_state,
+    verify_stdout,
+)
 
 
 SAFE_RISKS = {Risk.SAFE}
@@ -34,22 +40,14 @@ def _run(args: list[str], cwd: Path, timeout: int = 120) -> dict[str, Any]:
         return {"args": args, "display": _display_command(args), "error": repr(exc), "returncode": 127}
 
 
-def _loads_json_object(text: str | None, name: str) -> dict[str, Any]:
-    if not text:
-        return {}
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise SafetyError(f"{name} must be valid JSON object: {exc}") from exc
-    if not isinstance(value, dict):
-        raise SafetyError(f"{name} must be a JSON object")
-    return value
-
-
 def _unquote_windows_token(token: str) -> str:
     if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
         return token[1:-1]
     return token
+
+
+def _looks_windows_command(text: str) -> bool:
+    return "\\" in text or ".exe" in text.lower() or ".cmd" in text.lower() or ".bat" in text.lower()
 
 
 def _split_shell_command(text: str | None) -> list[str] | None:
@@ -62,9 +60,6 @@ def _split_shell_command(text: str | None) -> list[str] | None:
     if _looks_windows_command(text):
         return [_unquote_windows_token(arg) for arg in args]
     return args
-
-def _looks_windows_command(text: str) -> bool:
-    return "\\" in text or ".exe" in text.lower() or ".cmd" in text.lower() or ".bat" in text.lower()
 
 
 def require_not_blocked(journal: Journal, allow_recovery: bool = False) -> None:
@@ -130,14 +125,15 @@ def exec_risky(
     cwd = Path(cwd or journal.root).resolve()
     command_text = _display_command(command)
     assessment = assess_command(command_text, channel=channel)
-    expected_state = _loads_json_object(expected_state_json, "expected-state")
+    try:
+        expected_state = parse_expected_state(expected_state_json)
+    except VerificationError as exc:
+        raise SafetyError(str(exc)) from exc
 
     if not target.strip():
         raise SafetyError("exec-risky requires explicit --target")
     if not approved:
         raise SafetyError("exec-risky requires --approved after user review")
-    if not expected_state:
-        raise SafetyError("exec-risky requires non-empty --expected-state JSON")
     if not rollback_command.strip():
         raise SafetyError("exec-risky requires --rollback-command")
     if assessment.risk == Risk.CRITICAL and not allow_critical:
@@ -147,23 +143,49 @@ def exec_risky(
 
     verify_args = _split_shell_command(verify_command)
     receipt_args = _split_shell_command(receipt_command)
+    if expected_state.assertions and not verify_args:
+        raise SafetyError("непустые assertions требуют --verify-command или --verify-command-file")
+
     txn_id = ActionRecord.new_id()
     result = _run(command, cwd, timeout=timeout)
     verify_result: dict[str, Any] = {"command_returncode": result.get("returncode")}
     verify_exec: dict[str, Any] | None = None
-    if result.get("returncode") == 0 and verify_args:
+
+    verification: VerificationOutcome
+    if result.get("returncode") != 0:
+        verification = failed_verification(
+            expected_state.assertions,
+            "command_failed",
+            "основная команда завершилась с ненулевым кодом",
+        )
+    elif verify_args:
         verify_exec = _run(verify_args, cwd, timeout=timeout)
         verify_result["verify_returncode"] = verify_exec.get("returncode")
         verify_result["verify_display"] = verify_exec.get("display")
+        if verify_exec.get("returncode") != 0:
+            verification = failed_verification(
+                expected_state.assertions,
+                "verify_failed",
+                "verify-команда завершилась с ненулевым кодом",
+            )
+        else:
+            verification = verify_stdout(expected_state.assertions, str(verify_exec.get("stdout", "")))
+    else:
+        verification = VerificationOutcome(verification_complete=True)
+
+    if verification.error_code:
+        verify_result["verification_error_code"] = verification.error_code
+        verify_result["verification_error_message"] = verification.error_message
+
     receipt_exec: dict[str, Any] | None = None
-    if result.get("returncode") == 0 and (verify_exec is None or verify_exec.get("returncode") == 0) and receipt_args:
+    if result.get("returncode") == 0 and verification.successful and receipt_args:
         receipt_exec = _run(receipt_args, cwd, timeout=timeout)
         verify_result["receipt_returncode"] = receipt_exec.get("returncode")
         verify_result["receipt_display"] = receipt_exec.get("display")
 
     ok = (
         result.get("returncode") == 0
-        and (verify_exec is None or verify_exec.get("returncode") == 0)
+        and verification.successful
         and (receipt_exec is None or receipt_exec.get("returncode") == 0)
     )
     status = Status.DONE if ok else Status.UNEXPECTED
@@ -178,8 +200,13 @@ def exec_risky(
         command={"channel": channel, "domain": domain, "target": target, "args": command, "display": command_text},
         undo={"op": "manual-command", "command": rollback_command},
         redo={"op": "manual-command", "command": command_text},
-        expected_state=expected_state,
+        expected_state=expected_state.to_dict(),
         verify_result=verify_result,
+        verification_complete=verification.verification_complete,
+        verified_assertions=verification.verified_assertions,
+        missing_assertions=verification.missing_assertions,
+        mismatched_assertions=verification.mismatched_assertions,
+        actual_state=verification.actual_state,
         metadata={"assessment": assessment.to_dict(), "result": result, "verify_exec": verify_exec, "receipt_exec": receipt_exec},
     )
     journal.append(record)
