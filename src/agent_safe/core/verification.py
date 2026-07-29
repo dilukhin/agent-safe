@@ -75,10 +75,10 @@ def parse_expected_state(text: str | None) -> ExpectedStateSpec:
         raise VerificationError("assertions_not_object", "поле assertions должно быть JSON-объектом")
     if not isinstance(declarations, dict):
         raise VerificationError("declarations_not_object", "поле declarations должно быть JSON-объектом")
-    if not assertions and not declarations:
+    if not assertions:
         raise VerificationError(
-            "expected_state_empty_sections",
-            "expected state должен содержать непустые assertions или declarations",
+            "assertions_empty",
+            "поле assertions должно содержать хотя бы одно проверяемое утверждение",
         )
     return ExpectedStateSpec(assertions=assertions, declarations=declarations)
 

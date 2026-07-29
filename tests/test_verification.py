@@ -134,24 +134,29 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual(journal.records(), [])
 
-    def test_declarations_only_do_not_require_verify(self):
+    def test_declarations_only_is_rejected_before_action(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            marker = root / "changed.txt"
             journal = Journal(root)
-            record = exec_risky(
-                [sys.executable, "-c", "print('changed')"],
-                journal=journal,
-                channel="local",
-                domain="unknown",
-                target="test-target",
-                reason="test",
-                expected_state_json=json.dumps({"assertions": {}, "declarations": {"operation": "test"}}),
-                rollback_command="manual rollback",
-                approved=True,
-            )
-            self.assertEqual(record.status.value, "done")
-            self.assertTrue(record.verification_complete)
-            self.assertEqual(record.verified_assertions, {})
+            with self.assertRaisesRegex(SafetyError, "assertions"):
+                exec_risky(
+                    [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('changed')"],
+                    journal=journal,
+                    channel="local",
+                    domain="unknown",
+                    target="test-target",
+                    reason="test",
+                    expected_state_json=json.dumps({"assertions": {}, "declarations": {"operation": "test"}}),
+                    rollback_command="manual rollback",
+                    approved=True,
+                )
+            self.assertFalse(marker.exists())
+            self.assertEqual(journal.records(), [])
+
+    def test_expected_state_requires_nonempty_assertions(self):
+        with self.assertRaisesRegex(ValueError, "assertions"):
+            parse_expected_state('{"assertions":{},"declarations":{"operation":"test"}}')
 
     def test_old_journal_entries_remain_readable(self):
         with tempfile.TemporaryDirectory() as td:
