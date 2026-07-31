@@ -1,4 +1,154 @@
-name: CI
+name: Применение совместимого исправления
+
+on:
+  push:
+    branches:
+      - agent/add-ci-workflow-fix-staging
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить staging-ветку
+        uses: actions/checkout@v6
+        with:
+          ref: agent/add-ci-workflow-fix-staging
+
+      - name: Проверить и применить точечные изменения
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          expected = {
+              "src/agent_safe/__init__.py": "c71212a669c27801b4b1c7a931772c9ca507da77",
+              "src/agent_safe/opencode_bootstrap.py": "b63c8485aacac1b6f8a7d87bde1b06eb6603fb33",
+              "tests/test_cli.py": "02498dc069a4cc7f86278a78f30deb4a09d1bd33",
+              "tests/test_opencode_bootstrap.py": "26eee243c198f18682456cd4b7f03754e85997ff",
+          }
+
+          def blob_sha(path: Path) -> str:
+              data = path.read_bytes()
+              return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+
+          for name, sha in expected.items():
+              actual = blob_sha(Path(name))
+              if actual != sha:
+                  raise SystemExit(f"unexpected source blob {name}: {actual} != {sha}")
+
+          init_path = Path("src/agent_safe/__init__.py")
+          init_path.write_text(
+              '''"""agent-safe: cross-platform safety runtime for CLI agents."""
+
+import os
+import sys
+
+
+def _configure_windows_stdout_utf8() -> None:
+    # Windows может выбрать однобайтовую code page, неспособную вывести русский JSON.
+    if os.name != "nt":
+        return
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
+
+
+_configure_windows_stdout_utf8()
+
+__version__ = "0.4.0"
+''',
+              encoding="utf-8",
+          )
+
+          bootstrap_path = Path("src/agent_safe/opencode_bootstrap.py")
+          bootstrap = bootstrap_path.read_text(encoding="utf-8")
+          old_import = '''from importlib import resources
+from importlib.abc import Traversable
+'''
+          new_import = '''from importlib import resources
+try:
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python 3.10: Traversable ещё находится в importlib.abc.
+    from importlib.abc import Traversable
+'''
+          if bootstrap.count(old_import) != 1:
+              raise SystemExit("unexpected Traversable import block")
+          bootstrap_path.write_text(bootstrap.replace(old_import, new_import), encoding="utf-8")
+
+          cli_test_path = Path("tests/test_cli.py")
+          cli_test = cli_test_path.read_text(encoding="utf-8")
+          old_run = '''            text=True,
+            capture_output=True,
+'''
+          new_run = '''            encoding="utf-8",
+            capture_output=True,
+'''
+          if cli_test.count(old_run) != 1:
+              raise SystemExit("unexpected test_cli subprocess block")
+          cli_test = cli_test.replace(old_run, new_run, 1)
+          marker = '\n\nif __name__ == "__main__":\n'
+          if cli_test.count(marker) != 1:
+              raise SystemExit("unexpected test_cli footer")
+          windows_test = '''
+    @unittest.skipUnless(os.name == "nt", "проверка относится только к Windows")
+    def test_bootstrap_json_uses_utf8_on_windows(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "cp1252"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_safe",
+                    "--root",
+                    td,
+                    "opencode-bootstrap",
+                    "--scope",
+                    "project",
+                    "--dry-run",
+                ],
+                env=env,
+                encoding="utf-8",
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["mode"], "dry-run")
+            self.assertIn("Порядок действий", proc.stdout)
+'''
+          cli_test_path.write_text(cli_test.replace(marker, windows_test + marker), encoding="utf-8")
+
+          bootstrap_test_path = Path("tests/test_opencode_bootstrap.py")
+          bootstrap_test = bootstrap_test_path.read_text(encoding="utf-8")
+          import_marker = "from pathlib import Path\n"
+          import_line = "\nfrom agent_safe.opencode_bootstrap import _template_root\n"
+          if bootstrap_test.count(import_marker) != 1:
+              raise SystemExit("unexpected bootstrap test imports")
+          bootstrap_test = bootstrap_test.replace(import_marker, import_marker + import_line, 1)
+          if bootstrap_test.count(old_run) != 1:
+              raise SystemExit("unexpected bootstrap test subprocess block")
+          bootstrap_test = bootstrap_test.replace(old_run, new_run, 1)
+          method_marker = "    def test_opencode_bootstrap_dry_run_does_not_write(self) -> None:\n"
+          template_test = '''    def test_packaged_template_root_is_available(self) -> None:
+        template_root = _template_root()
+        self.assertTrue(template_root.joinpath("opencode.json").is_file())
+        self.assertTrue(template_root.joinpath("skills").is_dir())
+
+'''
+          if bootstrap_test.count(method_marker) != 1:
+              raise SystemExit("unexpected bootstrap test method marker")
+          bootstrap_test_path.write_text(
+              bootstrap_test.replace(method_marker, template_test + method_marker, 1),
+              encoding="utf-8",
+          )
+
+          Path(".github/workflows/ci.yml").write_text(
+              '''name: CI
 
 on:
   pull_request:
@@ -57,3 +207,30 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m agent_safe opencode-bootstrap --scope project --dry-run
+''',
+              encoding="utf-8",
+          )
+          PY
+
+          python -m py_compile \
+            src/agent_safe/__init__.py \
+            src/agent_safe/opencode_bootstrap.py \
+            tests/test_cli.py \
+            tests/test_opencode_bootstrap.py
+          PYTHONPATH=src python -m unittest discover -s tests -v
+          git diff --check
+
+      - name: Создать один staging-commit
+        shell: bash
+        run: |
+          git config user.name "agent-safe CI"
+          git config user.email "agent-safe-ci@users.noreply.github.com"
+          git add \
+            .github/workflows/ci.yml \
+            src/agent_safe/__init__.py \
+            src/agent_safe/opencode_bootstrap.py \
+            tests/test_cli.py \
+            tests/test_opencode_bootstrap.py
+          git diff --cached --stat
+          git commit -m "Исправлена совместимость с Python 3.14 и Windows"
+          git push origin HEAD:agent/add-ci-workflow-fix-staging
