@@ -19,7 +19,7 @@ class CliTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, "-m", "agent_safe", *args],
             cwd=cwd,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
 
@@ -83,6 +83,33 @@ class CliTests(unittest.TestCase):
         self.assertIn('"$HOME"/', proc.stdout)
         self.assertIn('"change":"install package"', proc.stdout)
         self.assertIn('"package":"nginx"', proc.stdout)
+
+
+    @unittest.skipUnless(os.name == "nt", "проверка относится только к Windows")
+    def test_bootstrap_json_uses_utf8_on_windows(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "cp1252"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_safe",
+                    "--root",
+                    td,
+                    "opencode-bootstrap",
+                    "--scope",
+                    "project",
+                    "--dry-run",
+                ],
+                env=env,
+                encoding="utf-8",
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["mode"], "dry-run")
+            self.assertIn("Порядок действий", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -7,15 +7,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_safe.opencode_bootstrap import _template_root
+
 
 class OpenCodeBootstrapTests(unittest.TestCase):
     def run_safe(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "agent_safe.cli", "--root", str(root), *args],
-            text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
+
+    def test_packaged_template_root_is_available(self) -> None:
+        template_root = _template_root()
+        self.assertTrue(template_root.joinpath("opencode.json").is_file())
+        self.assertTrue(template_root.joinpath("skills").is_dir())
 
     def test_opencode_bootstrap_dry_run_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

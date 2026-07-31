@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.10"
+          - "3.14"
+
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v6
+
+      - name: Настроить Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Показать версию Python
+        run: python --version
+
+      - name: Запустить модульные тесты
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+      - name: Проверить справку CLI
+        env:
+          PYTHONPATH: src
+        run: python -m agent_safe --help
+
+      - name: Проверить dry-run OpenCode bootstrap
+        env:
+          PYTHONPATH: src
+        run: python -m agent_safe opencode-bootstrap --scope project --dry-run
