@@ -5,7 +5,10 @@ import json
 import os
 import shutil
 from importlib import resources
-from importlib.abc import Traversable
+try:
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python 3.10: Traversable ещё находится в importlib.abc.
+    from importlib.abc import Traversable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
