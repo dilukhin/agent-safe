@@ -1,9 +1,9 @@
 name: Применение совместимого исправления
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/add-ci-workflow-fix-staging
+      - master
 
 permissions:
   contents: write
