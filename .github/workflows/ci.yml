@@ -25,7 +25,9 @@ jobs:
           python-version: "3.12"
 
       - name: Применить точечные изменения
-        run: python .github/apply_compat_fix.py
+        run: |
+          python .github/apply_compat_fix.py
+          git checkout HEAD -- .github/workflows/ci.yml
 
       - name: Проверить изменения
         env:
