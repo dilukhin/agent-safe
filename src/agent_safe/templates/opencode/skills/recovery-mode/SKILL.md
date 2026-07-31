@@ -1,21 +1,29 @@
 ---
 name: recovery-mode
-description: Procedure after surprising results from high-risk actions. Use when verify differs from expected_state or state is unclear after a risky action.
+description: Порядок действий после unexpected результата высокорисковой операции.
 compatibility: opencode
 ---
 
 # Recovery Mode
 
-Unexpected result after a high-risk action is an incident, not an obstacle.
+Unexpected result после высокорискового действия — инцидент, а не обычное препятствие.
 
-Rules:
+К unexpected относятся:
 
-1. Stop the original task.
-2. Do not improvise further state-changing fixes.
-3. Run read-only diagnostics only.
-4. Preserve evidence: command, cwd, output, target, expected state, actual state.
-5. Analyze why actual state differs from expected state.
-6. Prepare recovery options.
-7. Ask for approval before changing anything.
+- ненулевой код основной или verify-команды;
+- отсутствующее assertion;
+- несовпадение значения;
+- несовпадение типа;
+- пустой, невалидный или не являющийся объектом JSON фактического состояния.
 
-Use `safe diagnose` and `safe recovery-plan`.
+Правила:
+
+1. Остановить исходную задачу.
+2. Не выполнять cleanup, delete, overwrite, reset, force или слепой повтор.
+3. Выполнять только read-only диагностику.
+4. Сохранить команду, cwd, target, expected state, actual state, verified, missing и mismatched assertions.
+5. Установить причину расхождения.
+6. Подготовить варианты восстановления.
+7. Получить подтверждение перед любым новым изменением состояния.
+
+Используй `safe diagnose` и `safe recovery-plan`.

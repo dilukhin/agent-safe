@@ -35,6 +35,7 @@ AI-агенты и CLI-ассистенты хорошо автоматизир�
 - обратимые файловые операции `fs-move` и `fs-trash`;
 - `undo` / `redo` для записанных обратимых операций;
 - generic adapter для read-only и risky shell-команд;
+- структурная проверка `expected_state.assertions` по JSON, возвращённому verify-командой;
 - git adapter: checkpoint, bundle, безопасный preview `git clean`;
 - ssh_relay adapter для удалённых read-only и risky-команд;
 - Yandex Cloud adapter для `yc` read-only и change-операций;
@@ -168,13 +169,17 @@ safe exec-risky \
   --domain unknown \
   --target "resource:exact-id-or-path" \
   --reason "approved state change" \
-  --expected-state '{"state":"expected"}' \
+  --expected-state '{"assertions":{"state":"expected"},"declarations":{"operation":"update"}}' \
   --rollback-command "exact rollback command" \
-  --verify-command "exact verification command" \
+  --verify-command "command that prints {\"state\":\"expected\"}" \
   --receipt-command "optional command that records the completed change on the target side" \
   --approved \
   -- command arg1 arg2
 ```
+
+`assertions` содержат только свойства, которые verify обязан подтвердить. `declarations` сохраняются как контекст, но не считаются проверенными. Verify-команда должна вывести один JSON-объект фактического состояния. Все assertions должны присутствовать с теми же типами и значениями; дополнительные поля допустимы.
+
+Отсутствующее поле, несовпадение значения или типа, пустой либо невалидный JSON и ненулевой код verify дают `unexpected` и включают Recovery Mode. Непустые assertions без verify-команды запрещены до выполнения основного действия.
 
 On Windows/PowerShell, prefer file arguments for JSON and nested commands:
 
@@ -192,7 +197,9 @@ safe exec-risky `
   -- command arg1 arg2
 ```
 
-`--receipt-command` runs only after the main command and optional verify command succeed. Use it to write an audit receipt on the changed host, for example append JSONL to `C:\ProgramData\agent-safe\changes.jsonl` during remote maintenance.
+`expected-state.json` должен содержать объект с полями `assertions` и `declarations`. Файл verify-команды должен описывать команду, которая печатает JSON фактического состояния.
+
+`--receipt-command` runs only after the main command succeeds and all assertions are fully verified. It is not run after an incomplete or failed verification. Use it to write an audit receipt on the changed host, for example append JSONL to `C:\ProgramData\agent-safe\changes.jsonl` during remote maintenance.
 
 Generate a receipt command instead of hand-writing nested quoting:
 
@@ -215,6 +222,7 @@ safe ssh-relay-risky \
   --remote-command "sudo -n apt-get install -y nginx" \
   --expected-state-file expected-state.json \
   --rollback-command-file rollback.txt \
+  --verify-remote-command "command that prints normalized JSON" \
   --receipt-path ~/.local/state/agent-safe/changes.jsonl \
   --approved
 ```
@@ -245,7 +253,6 @@ safe redo last
 safe diagnose
 safe recovery-plan
 ```
-
 
 ## Подключение к OpenCode одной командой
 
@@ -317,21 +324,22 @@ unexpected result + high risk = recovery mode
 - понятный channel;
 - понятное окружение;
 - причина действия;
-- expected state до выполнения;
+- expected state с проверяемыми assertions до выполнения;
 - rollback-команда или recovery-план;
-- verify-команда;
+- verify-команда, возвращающая JSON фактического состояния;
 - явное подтверждение `--approved`.
 
 Нельзя полагаться на glob, aliases, hidden defaults, chained commands и «примерное понимание» поведения инструмента.
 
 ### 4. Unexpected result — это инцидент
 
-Если verify не совпал с `expected_state` или risky-команда завершилась неожиданно:
+Если verify не подтвердил все assertions или risky-команда завершилась неожиданно:
 
 - транзакция получает статус `unexpected`;
 - создаётся `.agent-safety/INCIDENT_BLOCKED`;
 - дальнейшие high-risk операции блокируются;
 - основная задача должна остановиться;
+- receipt не запускается;
 - разрешены только диагностика и планирование восстановления.
 
 Это правило защищает от самой опасной цепочки: «первая команда дала неожиданный результат, агент продолжил и сделал ещё хуже».
@@ -364,32 +372,34 @@ unexpected result + high risk = recovery mode
 
 Каждое значимое действие записывается как транзакция.
 
-Пример полей:
+Для рискованной команды журнал содержит ожидаемое состояние и структурный результат проверки:
 
 ```json
 {
-  "txn_id": "20260629-001",
-  "domain": "filesystem",
-  "channel": "local",
-  "operation": "move",
-  "risk": "dangerous",
-  "target": "./old -> ./new",
-  "reason": "rename directory",
+  "txn_id": "20260728-001",
+  "status": "done",
   "expected_state": {
-    "source_exists": false,
-    "destination_exists": true
+    "assertions": {
+      "service": "active"
+    },
+    "declarations": {
+      "operation": "restart"
+    }
   },
-  "undo": {
-    "command": "move ./new ./old"
+  "verification_complete": true,
+  "verified_assertions": {
+    "service": "active"
   },
-  "redo": {
-    "command": "move ./old ./new"
-  },
-  "status": "done"
+  "missing_assertions": {},
+  "mismatched_assertions": {},
+  "actual_state": {
+    "service": "active",
+    "diagnostics": {}
+  }
 }
 ```
 
-Модель не должна писать журнал вручную. Его формирует `safe`.
+Старые JSONL-записи остаются читаемыми и не требуют миграции. Модель не должна писать журнал вручную: его формирует `safe`.
 
 ## Адаптеры
 
@@ -411,12 +421,14 @@ safe exec-risky \
   --domain unknown \
   --target "exact target" \
   --reason "why this is needed" \
-  --expected-state '{"ok":true}' \
+  --expected-state '{"assertions":{"ok":true},"declarations":{"operation":"apply"}}' \
   --rollback-command "exact rollback" \
-  --verify-command "exact verify" \
+  --verify-command "command that prints {\"ok\":true}" \
   --approved \
   -- tool apply --id exact-id
 ```
+
+Сравнение assertions с JSON из stdout verify централизовано в generic adapter. Тонкие адаптеры `system`, `yc` и `ssh_relay` не дублируют алгоритм.
 
 ### Filesystem adapter
 
@@ -468,13 +480,13 @@ safe ssh-relay-risky \
   --host-label "server-1" \
   --remote-command "systemctl restart app" \
   --reason "restart after approved config change" \
-  --expected-state '{"service":"active"}' \
+  --expected-state '{"assertions":{"service":"active"},"declarations":{"operation":"restart"}}' \
   --rollback-command "ssh_relay exec 'systemctl restart app-old'" \
-  --verify-remote-command "systemctl is-active app" \
+  --verify-remote-command "command that prints {\"service\":\"active\"}" \
   --approved
 ```
 
-Для удалённых команд особенно важно явно понимать host, user, cwd, окружение и blast radius.
+Для удалённых команд особенно важно явно понимать host, user, cwd, окружение и blast radius. Verify-команда должна печатать JSON фактического состояния; сравнение выполняет generic adapter.
 
 ### Yandex Cloud adapter
 
@@ -492,9 +504,9 @@ State-changing:
 safe yc-change \
   --target "compute.instance:<id>" \
   --reason "stop test VM" \
-  --expected-state '{"status":"STOPPED"}' \
+  --expected-state '{"assertions":{"status":"STOPPED"},"declarations":{"operation":"stop"}}' \
   --rollback-command "yc compute instance start --id <id>" \
-  --verify-command "yc compute instance get --id <id>" \
+  --verify-command "command that prints normalized JSON with status" \
   --approved \
   -- compute instance stop --id <id>
 ```
@@ -516,9 +528,9 @@ Risky:
 safe system-change \
   --target "service:app" \
   --reason "restart service after approved change" \
-  --expected-state '{"service":"active"}' \
+  --expected-state '{"assertions":{"service":"active"},"declarations":{"operation":"restart"}}' \
   --rollback-command "systemctl restart app-old" \
-  --verify-command "systemctl is-active app" \
+  --verify-command "command that prints {\"service\":\"active\"}" \
   --approved \
   -- systemctl restart app
 ```
@@ -542,7 +554,7 @@ safe undo last
 
 1. остановить исходную задачу;
 2. собрать read-only evidence;
-3. сравнить expected state и actual state;
+3. сравнить expected state, actual state, verified, missing и mismatched assertions;
 4. определить, можно ли безопасно выполнить undo;
 5. если undo небезопасен — подготовить manual recovery plan;
 6. получить подтверждение пользователя;
@@ -622,7 +634,7 @@ python -m unittest discover -s tests
 Запуск тестов без установки:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests
+PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 Сборка zipapp:
@@ -636,6 +648,7 @@ python scripts/build_zipapp.py
 ```bash
 PYTHONPATH=src python -m agent_safe --help
 PYTHONPATH=src python -m agent_safe assess --command "git clean -f"
+PYTHONPATH=src python -m agent_safe opencode-bootstrap --scope project --dry-run
 ```
 
 Установка в editable-режиме:
@@ -655,6 +668,7 @@ agent-safe/
       journal.py
       models.py
       risk.py
+      verification.py
     adapters/
       exec_adapter.py
       fs.py
@@ -702,7 +716,7 @@ agent-safe/
 
 ### Expected state before execution
 
-Агент должен знать, что именно должно измениться. Если ожидаемое состояние нельзя сформулировать, команду выполнять нельзя.
+Агент должен отделять проверяемые `assertions` от декларативного контекста. Непустые assertions требуют verify-команду, которая возвращает JSON фактического состояния. Если ожидаемое состояние нельзя сформулировать и проверить, команду выполнять нельзя.
 
 ### Stop on surprise
 

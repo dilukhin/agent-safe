@@ -75,6 +75,11 @@ class ActionRecord:
     redo: dict[str, Any] = field(default_factory=dict)
     expected_state: dict[str, Any] = field(default_factory=dict)
     verify_result: dict[str, Any] = field(default_factory=dict)
+    verification_complete: bool = False
+    verified_assertions: dict[str, Any] = field(default_factory=dict)
+    missing_assertions: dict[str, Any] = field(default_factory=dict)
+    mismatched_assertions: dict[str, Any] = field(default_factory=dict)
+    actual_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

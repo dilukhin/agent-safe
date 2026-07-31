@@ -1,92 +1,131 @@
-# Adapters
+# Адаптеры
 
-`agent-safe` uses a single safety protocol for every external state change:
+`agent-safe` использует единый протокол для любого изменения внешнего состояния:
 
 ```text
 classify -> inspect -> expected_state -> checkpoint -> execute one atomic action -> verify -> continue/recovery
 ```
 
-Adapters are small wrappers around different execution channels. If a channel is unknown, use the generic `exec-readonly` / `exec-risky` path and treat the action as high-risk until proven otherwise.
+Адаптеры являются небольшими обёртками над каналами выполнения. Сравнение ожидаемого и фактического состояния централизовано в generic adapter; `system`, `yc` и `ssh_relay` не реализуют собственные алгоритмы проверки.
 
-## Generic execution adapter
+## Структурный expected state
 
-Read-only command:
+Для рискованных команд expected state разделяется на проверяемые утверждения и декларативный контекст:
+
+```json
+{
+  "assertions": {
+    "temporary_files_absent": true,
+    "ssh_key_preserved": true
+  },
+  "declarations": {
+    "operation": "cleanup"
+  }
+}
+```
+
+Verify-команда должна завершиться с кодом `0` и вывести один JSON-объект фактического состояния:
+
+```json
+{
+  "temporary_files_absent": true,
+  "ssh_key_preserved": true,
+  "diagnostics": {}
+}
+```
+
+Правила проверки:
+
+- все поля `assertions` обязательны;
+- типы и значения должны совпадать точно;
+- вложенные объекты и списки сравниваются рекурсивно;
+- дополнительные поля фактического состояния допустимы;
+- `declarations` сохраняются в журнале, но не помечаются как проверенные;
+- непустые `assertions` требуют verify-команду;
+- невалидный JSON, отсутствующее поле, несовпадение значения или типа дают `unexpected` и включают Recovery Mode;
+- receipt запускается только после полного подтверждения assertions.
+
+В журнале сохраняются `verification_complete`, `verified_assertions`, `missing_assertions`, `mismatched_assertions` и `actual_state`. Старые записи читаются без миграции.
+
+## Универсальный адаптер выполнения
+
+Read-only команда:
 
 ```bash
 safe exec-readonly --channel local --domain system -- python --version
 ```
 
-Risky command:
+Рискованная команда:
 
 ```bash
 safe exec-risky \
   --channel local \
   --domain unknown \
   --target "resource:exact-id-or-path" \
-  --reason "explain why this change is needed" \
-  --expected-state '{"state":"expected"}' \
-  --rollback-command "exact rollback command" \
-  --verify-command "exact verification command" \
+  --reason "обоснование изменения" \
+  --expected-state '{"assertions":{"state":"expected"},"declarations":{"operation":"update"}}' \
+  --rollback-command "точная команда отката" \
+  --verify-command "команда, печатающая JSON фактического состояния" \
   --approved \
   -- command arg1 arg2
 ```
 
-`exec-risky` refuses to run unless the target, reason, expected state, rollback command, and approval are present. If the command or verification returns a non-zero exit code, the transaction is marked `unexpected` and `.agent-safety/INCIDENT_BLOCKED` is created.
+`exec-risky` отказывается работать без точной цели, причины, expected state, rollback и подтверждения. Если assertions непусты, verify обязателен. Ненулевой код основной или проверочной команды, неполная проверка и несовпадение переводят транзакцию в `unexpected` и создают `.agent-safety/INCIDENT_BLOCKED`.
 
 ## Git adapter
 
-Create evidence before high-risk git work:
+Создание evidence перед рискованной работой:
 
 ```bash
 safe git-checkpoint --reason "before rebase" --bundle
 ```
 
-Preview cleanup without deletion:
+Предпросмотр очистки без удаления:
 
 ```bash
 safe git-clean-preview
 safe git-clean-preview --include-ignored
 ```
 
-Direct `git clean -f`, `git reset --hard`, forced push, branch delete, and stash drop should be blocked by OpenCode permissions or handled through a future specialized adapter with explicit rollback planning.
+Прямые `git clean -f`, `git reset --hard`, force push и удаление веток должны блокироваться OpenCode permissions либо выполняться через специализированный безопасный сценарий.
 
 ## ssh_relay adapter
 
-The adapter expects a relay interface compatible with:
+Адаптер ожидает relay-интерфейс:
 
 ```text
 <relay command> exec "<remote command>"
 ```
 
-Read-only remote command:
+Read-only команда:
 
 ```bash
 safe ssh-relay-readonly \
   --relay "ssh_relay" \
   --host-label "4BSDownloader2" \
   --remote-command "pwd" \
-  --reason "confirm remote cwd"
+  --reason "проверить удалённый рабочий каталог"
 ```
 
-Risky remote command:
+Рискованная команда:
 
 ```bash
 safe ssh-relay-risky \
   --relay "ssh_relay" \
   --host-label "server-1" \
   --remote-command "systemctl restart app" \
-  --reason "restart after config change" \
-  --expected-state '{"service":"active"}' \
+  --reason "перезапуск после согласованного изменения" \
+  --expected-state '{"assertions":{"service":"active"},"declarations":{"operation":"restart"}}' \
   --rollback-command "ssh_relay exec 'systemctl restart app-old'" \
-  --verify-remote-command "systemctl is-active app" \
+  --verify-remote-command "команда, печатающая {\"service\":\"active\"}" \
   --approved
 ```
 
-If the remote command is unfamiliar or state-changing, use the risky path. The agent must know host, cwd/environment, expected state, and rollback before running it.
+Удалённая verify-команда должна вернуть JSON. Сравнение выполняется generic adapter после получения stdout relay-команды.
 
 ## Yandex Cloud adapter
 
-Read-only inspection:
+Read-only проверка:
 
 ```bash
 safe yc-readonly -- config list
@@ -94,51 +133,51 @@ safe yc-readonly -- compute instance get --id <instance-id>
 safe yc-readonly -- compute disk list
 ```
 
-Risky cloud operation:
+Изменение облачного ресурса:
 
 ```bash
 safe yc-change \
   --target "compute.instance:<id>" \
-  --reason "stop test VM" \
-  --expected-state '{"status":"STOPPED"}' \
+  --reason "остановить тестовую ВМ" \
+  --expected-state '{"assertions":{"status":"STOPPED"},"declarations":{"operation":"stop"}}' \
   --rollback-command "yc compute instance start --id <id>" \
-  --verify-command "yc compute instance get --id <id>" \
+  --verify-command "команда, печатающая нормализованный JSON фактического состояния" \
   --approved \
   -- compute instance stop --id <id>
 ```
 
-Deleting resources, changing IAM, changing network/security groups, detaching disks, changing public IPs, and stopping production VMs should be treated as critical.
+Удаление ресурсов, изменение IAM, сети, security groups, дисков, публичных IP и production-ВМ остаются критическими действиями.
 
 ## System / VM adapter
 
-Read-only system inspection:
+Read-only проверка:
 
 ```bash
 safe system-readonly -- hostname
 safe system-readonly -- systemctl status app
 ```
 
-Risky system action:
+Рискованное системное действие:
 
 ```bash
 safe system-change \
   --target "service:app" \
-  --reason "restart service after approved change" \
-  --expected-state '{"service":"active"}' \
+  --reason "перезапуск после согласованного изменения" \
+  --expected-state '{"assertions":{"service":"active"},"declarations":{"operation":"restart"}}' \
   --rollback-command "systemctl restart app-old" \
-  --verify-command "systemctl is-active app" \
+  --verify-command "команда, печатающая {\"service\":\"active\"}" \
   --approved \
   -- systemctl restart app
 ```
 
-If the command result is unexpected, do not retry blindly. Use `safe diagnose` and `safe recovery-plan`.
+При unexpected нельзя повторять действие вслепую. Следует использовать `safe diagnose` и `safe recovery-plan`.
 
-## Unknown systems
+## Неизвестные системы
 
-For tools without a dedicated adapter:
+Для инструмента без отдельного адаптера:
 
-1. Start with `safe assess --command "..."`.
-2. Run help/status/list/show/describe/dry-run only.
-3. Use `safe exec-readonly` only if the action is clearly read-only.
-4. Use `safe exec-risky` for any state-changing or unclear command.
-5. If consequences or rollback are unclear, do not execute.
+1. Выполнить `safe assess --command "..."`.
+2. Использовать только help/status/list/show/describe/plan/dry-run/diff.
+3. Применять `safe exec-readonly` только к доказанно read-only командам.
+4. Любое изменение или неясную команду проводить через `safe exec-risky`.
+5. Не выполнять действие, если последствия, assertions или rollback не определены.
