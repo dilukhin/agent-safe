@@ -87,11 +87,16 @@ def _transition_for_dest(record: dict[str, Any], current_key: str) -> str | None
 def resource_class(path: Path, journal: Journal) -> str:
     current_key = _key(path)
     for record in reversed(journal.records()):
+        command = record.get("command") or {}
+        if record.get("kind") == "fs.cleanup":
+            cleanup_class = (record.get("metadata") or {}).get("resource_class")
+            cleanup_path = command.get("path")
+            if cleanup_path and _key(cleanup_path) == current_key and cleanup_class in RESOURCE_CLASSES:
+                return str(cleanup_class)
         if record.get("kind") == "fs.mark":
-            command = record.get("command") or {}
-            marked_path = command.get("path")
             marked_class = command.get("resource_class")
-            if marked_path and _key(marked_path) == current_key and marked_class in RESOURCE_CLASSES:
+            marked_paths = [command.get("path"), command.get("requested_path")]
+            if marked_class in RESOURCE_CLASSES and any(value and _key(value) == current_key for value in marked_paths):
                 return str(marked_class)
         previous_key = _transition_for_dest(record, current_key)
         if previous_key is not None:
@@ -168,10 +173,10 @@ def fs_mark(path: Path, resource_class_name: str, reason: str, journal: Journal)
     require_not_blocked(journal)
     if resource_class_name not in RESOURCE_CLASSES:
         raise SafetyError(f"неподдерживаемый класс ресурса: {resource_class_name}")
-    path = _absolute(path)
-    if not _lexists(path):
-        raise SafetyError(f"путь не существует: {path}")
-    path = _identity_path(path)
+    requested_path = _absolute(path)
+    if not _lexists(requested_path):
+        raise SafetyError(f"путь не существует: {requested_path}")
+    path = _identity_path(requested_path)
     _guard_safety_path(path, journal)
     before_class = resource_class(path, journal)
     txn_id = ActionRecord.new_id()
@@ -183,7 +188,12 @@ def fs_mark(path: Path, resource_class_name: str, reason: str, journal: Journal)
         reason=reason,
         cwd=str(Path.cwd().resolve()),
         target_paths=[str(path)],
-        command={"op": "mark", "path": str(path), "resource_class": resource_class_name},
+        command={
+            "op": "mark",
+            "path": str(path),
+            "requested_path": str(requested_path),
+            "resource_class": resource_class_name,
+        },
         expected_state={"resource_class": resource_class_name},
         verify_result={"resource_class": resource_class_name},
         verification_complete=True,
@@ -206,7 +216,7 @@ def _history_for(path: Path, journal: Journal) -> list[dict[str, Any]]:
     for record in reversed(journal.records()):
         command = record.get("command") or {}
         keys: set[str] = set()
-        for field in ("path", "source", "dest"):
+        for field in ("path", "requested_path", "source", "dest"):
             value = command.get(field)
             if value:
                 keys.add(_key(value))
@@ -260,7 +270,6 @@ def fs_cleanup(path: Path, reason: str, journal: Journal) -> ActionRecord:
     path = _absolute(path)
     if not _lexists(path):
         raise SafetyError(f"путь не существует: {path}")
-    path = _identity_path(path)
     _guard_cleanup_scope(path, journal)
     klass = resource_class(path, journal)
     if klass != "temporary":
