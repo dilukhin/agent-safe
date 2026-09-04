@@ -19,12 +19,22 @@ def _absolute(path: Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
-def _key(path: Path | str) -> str:
-    return os.path.normcase(str(_absolute(Path(path))))
-
-
 def _lexists(path: Path) -> bool:
     return os.path.lexists(str(path))
+
+
+def _identity_path(path: Path | str) -> Path:
+    absolute = _absolute(Path(path))
+    if _lexists(absolute) and not absolute.is_symlink():
+        try:
+            return absolute.resolve()
+        except OSError:
+            pass
+    return absolute
+
+
+def _key(path: Path | str) -> str:
+    return os.path.normcase(str(_identity_path(path)))
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -161,6 +171,7 @@ def fs_mark(path: Path, resource_class_name: str, reason: str, journal: Journal)
     path = _absolute(path)
     if not _lexists(path):
         raise SafetyError(f"путь не существует: {path}")
+    path = _identity_path(path)
     _guard_safety_path(path, journal)
     before_class = resource_class(path, journal)
     txn_id = ActionRecord.new_id()
@@ -249,6 +260,7 @@ def fs_cleanup(path: Path, reason: str, journal: Journal) -> ActionRecord:
     path = _absolute(path)
     if not _lexists(path):
         raise SafetyError(f"путь не существует: {path}")
+    path = _identity_path(path)
     _guard_cleanup_scope(path, journal)
     klass = resource_class(path, journal)
     if klass != "temporary":
