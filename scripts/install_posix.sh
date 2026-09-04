@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
-python3 -m pip install --user -e .
-printf '%s\n' 'Installed. Make sure ~/.local/bin is in PATH, then run: safe --help'
+python3 -m pip install --user .
+printf '%s\n' 'Установлено. Убедитесь, что ~/.local/bin входит в PATH, затем выполните: safe --help'
