@@ -12,5 +12,5 @@ OUT = DIST / "safe.pyz"
 DIST.mkdir(exist_ok=True)
 if OUT.exists():
     OUT.unlink()
-zipapp.create_archive(SRC, OUT, main="agent_safe.cli:main", interpreter="/usr/bin/env python3", compressed=True)
+zipapp.create_archive(SRC, OUT, main="agent_safe.entrypoint:main", interpreter="/usr/bin/env python3", compressed=True)
 print(f"created {OUT}")

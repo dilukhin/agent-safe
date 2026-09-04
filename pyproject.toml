@@ -21,7 +21,7 @@ dependencies = []
 agent_safe = ["templates/opencode/opencode.json", "templates/opencode/skills/*/SKILL.md"]
 
 [project.scripts]
-safe = "agent_safe.cli:main"
+safe = "agent_safe.entrypoint:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
