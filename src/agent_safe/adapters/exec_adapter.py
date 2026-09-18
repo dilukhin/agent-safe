@@ -9,6 +9,7 @@ from agent_safe.adapters.fs import SafetyError
 from agent_safe.core.journal import Journal
 from agent_safe.core.models import ActionRecord, Risk, Status
 from agent_safe.core.risk import assess_command
+from agent_safe.core.recovery import validate_recovery_contract
 from agent_safe.core.verification import (
     VerificationError,
     VerificationOutcome,
@@ -113,7 +114,8 @@ def exec_risky(
     target: str,
     reason: str,
     expected_state_json: str,
-    rollback_command: str,
+    rollback_command: str | None = None,
+    recovery_contract_json: str | None = None,
     verify_command: str | None = None,
     receipt_command: str | None = None,
     approved: bool = False,
@@ -134,8 +136,13 @@ def exec_risky(
         raise SafetyError("exec-risky requires explicit --target")
     if not approved:
         raise SafetyError("exec-risky requires --approved after user review")
-    if not rollback_command.strip():
-        raise SafetyError("exec-risky requires --rollback-command")
+    if not reason.strip():
+        raise SafetyError("exec-risky требует непустое обоснование")
+    has_rollback = bool(rollback_command and rollback_command.strip())
+    if recovery_contract_json is not None and has_rollback:
+        raise SafetyError("нужно выбрать rollback-команду ИЛИ план восстановления, не оба")
+    if recovery_contract_json is None and not has_rollback:
+        raise SafetyError("exec-risky требует --rollback-command или явный --recovery-contract-file")
     if assessment.risk == Risk.CRITICAL and not allow_critical:
         raise SafetyError("critical command requires --allow-critical plus explicit recovery plan")
     if assessment.risk == Risk.SAFE and not assessment.state_changing:
@@ -145,9 +152,36 @@ def exec_risky(
     receipt_args = _split_shell_command(receipt_command)
     if expected_state.assertions and not verify_args:
         raise SafetyError("непустые assertions требуют --verify-command или --verify-command-file")
+    if recovery_contract_json is not None and (not expected_state.assertions or not verify_args):
+        raise SafetyError("checkpoint требует непустые assertions и обязательную verify-команду")
 
+    recovery = (
+        validate_recovery_contract(recovery_contract_json, target=target, cwd=cwd)
+        if recovery_contract_json is not None
+        else {"mode": "rollback-command", "automatic": False}
+    )
     txn_id = ActionRecord.new_id()
-    result = _run(command, cwd, timeout=timeout)
+    if recovery_contract_json is not None:
+        planned = ActionRecord(
+            txn_id=txn_id, status=Status.PLANNED, kind=f"{domain}.risky-exec",
+            risk=assessment.risk, reason=reason, cwd=str(cwd), target_paths=[target],
+            command={"channel": channel, "domain": domain, "target": target, "args": command, "display": command_text},
+            expected_state=expected_state.to_dict(),
+            metadata={"recovery": recovery, "verify_args": verify_args, "receipt_args": receipt_args, "approved": True},
+        )
+        try:
+            journal.append(planned, durable=True)
+            journal.begin_pending(txn_id)
+        except OSError as exc:
+            raise SafetyError("не удалось зафиксировать план восстановления; действие не запущено") from exc
+
+    def execute_once(args: list[str]) -> dict[str, Any]:
+        try:
+            return _run(args, cwd, timeout=timeout)
+        except KeyboardInterrupt:
+            return {"returncode": 130, "error": "выполнение прервано; результат неизвестен"}
+
+    result = execute_once(command)
     verify_result: dict[str, Any] = {"command_returncode": result.get("returncode")}
     verify_exec: dict[str, Any] | None = None
 
@@ -159,7 +193,7 @@ def exec_risky(
             "основная команда завершилась с ненулевым кодом",
         )
     elif verify_args:
-        verify_exec = _run(verify_args, cwd, timeout=timeout)
+        verify_exec = execute_once(verify_args)
         verify_result["verify_returncode"] = verify_exec.get("returncode")
         verify_result["verify_display"] = verify_exec.get("display")
         if verify_exec.get("returncode") != 0:
@@ -179,7 +213,7 @@ def exec_risky(
 
     receipt_exec: dict[str, Any] | None = None
     if result.get("returncode") == 0 and verification.successful and receipt_args:
-        receipt_exec = _run(receipt_args, cwd, timeout=timeout)
+        receipt_exec = execute_once(receipt_args)
         verify_result["receipt_returncode"] = receipt_exec.get("returncode")
         verify_result["receipt_display"] = receipt_exec.get("display")
 
@@ -198,8 +232,14 @@ def exec_risky(
         cwd=str(cwd),
         target_paths=[target],
         command={"channel": channel, "domain": domain, "target": target, "args": command, "display": command_text},
-        undo={"op": "manual-command", "command": rollback_command},
-        redo={"op": "manual-command", "command": command_text},
+        undo=(
+            {"op": "manual-command", "command": rollback_command}
+            if has_rollback else {"op": "manual-recovery", "automatic": False}
+        ),
+        redo=(
+            {"op": "manual-command", "command": command_text}
+            if has_rollback else {"op": "manual-review-required", "automatic": False}
+        ),
         expected_state=expected_state.to_dict(),
         verify_result=verify_result,
         verification_complete=verification.verification_complete,
@@ -207,9 +247,14 @@ def exec_risky(
         missing_assertions=verification.missing_assertions,
         mismatched_assertions=verification.mismatched_assertions,
         actual_state=verification.actual_state,
-        metadata={"assessment": assessment.to_dict(), "result": result, "verify_exec": verify_exec, "receipt_exec": receipt_exec},
+        metadata={"assessment": assessment.to_dict(), "result": result, "verify_exec": verify_exec, "receipt_exec": receipt_exec, "recovery": recovery},
     )
-    journal.append(record)
     if status == Status.UNEXPECTED:
         journal.block(f"unexpected result after {domain}.risky-exec", txn_id)
+    journal.append(record, durable=recovery_contract_json is not None)
+    if status == Status.DONE and recovery_contract_json is not None and not journal.finish_pending(txn_id):
+        record.status = Status.UNEXPECTED
+        record.verify_result["recovery_barrier_error"] = True
+        journal.block("не удалось завершить барьер проверки восстановления", txn_id)
+        journal.append(record)
     return record

@@ -181,7 +181,13 @@ def cmd_exec_readonly(args: argparse.Namespace) -> int:
 def cmd_exec_risky(args: argparse.Namespace) -> int:
     journal = Journal(Path(args.root) if args.root else None)
     expected_state = _choose_arg(args.expected_state, args.expected_state_file, "expected-state", required=True)
-    rollback_command = _choose_arg(args.rollback_command, args.rollback_command_file, "rollback-command", required=True)
+    rollback_command = _choose_arg(args.rollback_command, args.rollback_command_file, "rollback-command")
+    if args.recovery_contract_file and (args.rollback_command is not None or args.rollback_command_file is not None):
+        raise SafetyError("--recovery-contract-file несовместим с rollback-командой")
+    try:
+        recovery_contract = _read_text_arg(args.recovery_contract_file)
+    except (OSError, UnicodeError) as exc:
+        raise SafetyError("не удалось прочитать UTF-8 файл плана восстановления") from exc
     verify_command = _choose_arg(args.verify_command, args.verify_command_file, "verify-command")
     receipt_command = _choose_arg(args.receipt_command, args.receipt_command_file, "receipt-command")
     record = exec_risky(
@@ -193,6 +199,7 @@ def cmd_exec_risky(args: argparse.Namespace) -> int:
         reason=args.reason,
         expected_state_json=expected_state or "",
         rollback_command=rollback_command or "",
+        recovery_contract_json=recovery_contract,
         verify_command=verify_command,
         receipt_command=receipt_command,
         approved=args.approved,
@@ -346,7 +353,18 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
 def cmd_recovery_plan(args: argparse.Namespace) -> int:
     journal = Journal(Path(args.root) if args.root else None)
-    rec = journal.find(args.txn_id) if args.txn_id else journal.last_reversible(include_undone=True)
+    txn_id = args.txn_id
+    if txn_id is None and journal.is_blocked():
+        try:
+            block = json.loads(journal.block_path.read_text(encoding="utf-8"))
+            if not isinstance(block, dict):
+                raise ValueError("не объект")
+            txn_id = block.get("pending_txn_id") or block.get("txn_id")
+            if not isinstance(txn_id, str) or not txn_id.strip():
+                raise ValueError("нет транзакции")
+        except (OSError, ValueError) as exc:
+            raise SafetyError("не удалось определить заблокированную транзакцию; выполните diagnose и укажите txn_id явно") from exc
+    rec = journal.find(txn_id) if txn_id else journal.last_reversible(include_undone=True)
     plan = {
         "mode": "recovery-plan",
         "principle": "Unexpected result after high-risk action is an incident, not an obstacle.",
@@ -359,6 +377,15 @@ def cmd_recovery_plan(args: argparse.Namespace) -> int:
             "If undo preconditions do not hold, ask the user for a manual recovery plan.",
         ],
     }
+    recovery = (rec or {}).get("metadata", {}).get("recovery", {})
+    if recovery.get("mode") == "checkpoint":
+        plan["steps"] = [
+            "Остановить исходную задачу; не повторять команду автоматически.",
+            "Выполнить только read-only диагностику и сравнить ожидаемое состояние с фактическим.",
+            "Повторно подтвердить доступность контрольной точки и условия восстановления.",
+            "Отдельно согласовать ручное или специализированное восстановление; undo/redo здесь не выполняются.",
+        ]
+        plan["recovery_contract"] = recovery["contract"]
     print_json(plan)
     return 0
 
@@ -420,7 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("exec_command", nargs=argparse.REMAINDER, help="command after --")
     p.set_defaults(func=cmd_exec_readonly)
 
-    p = sub.add_parser("exec-risky", help="Execute one approved risky command with expected state and rollback")
+    p = sub.add_parser("exec-risky", help="Выполнить согласованную рискованную команду с rollback или явным планом восстановления")
     p.add_argument("--channel", default="unknown")
     p.add_argument("--domain", default="unknown")
     p.add_argument("--target", required=True)
@@ -429,6 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-state-file", help="file containing expected-state JSON")
     p.add_argument("--rollback-command")
     p.add_argument("--rollback-command-file", help="file containing rollback command text")
+    p.add_argument("--recovery-contract-file", help="UTF-8 JSON плана восстановления через контрольную точку вместо rollback-команды")
     p.add_argument("--verify-command")
     p.add_argument("--verify-command-file", help="file containing verification command text")
     p.add_argument("--receipt-command", help="command that records the completed change on the target side")
