@@ -16,3 +16,5 @@ def _configure_windows_stdout_utf8() -> None:
 _configure_windows_stdout_utf8()
 
 __version__ = "0.4.0"
+
+from ._build_metadata import SOURCE_COMMIT as __source_commit__

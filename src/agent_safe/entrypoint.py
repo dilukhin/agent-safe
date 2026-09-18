@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from . import cli as legacy_cli
 from .adapters.fs import SafetyError
 from .adapters.fs_lifecycle import RESOURCE_CLASSES, fs_cleanup, fs_mark, fs_status
+from .build_identity import diagnostic_identity
 from .adapters.ssh_relay import ssh_relay_risky
 from .core.journal import Journal
 
@@ -15,6 +17,18 @@ def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction: 
         if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
             return action
     raise RuntimeError("в CLI parser отсутствует таблица подкоманд")
+
+
+def _configure_version_identity(parser: argparse.ArgumentParser) -> None:
+    for action in parser._actions:
+        if "--version" in action.option_strings:
+            action.version = diagnostic_identity()
+            return
+    raise RuntimeError("в CLI parser отсутствует параметр --version")
+
+
+def _emit_diagnostic_identity() -> None:
+    print(diagnostic_identity(), file=sys.stderr)
 
 
 def cmd_fs_mark(args: argparse.Namespace) -> int:
@@ -74,6 +88,7 @@ def cmd_ssh_relay_risky(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = legacy_cli.build_parser()
+    _configure_version_identity(parser)
     sub = _subparsers(parser)
 
     ssh_risky = sub.choices.get("ssh-relay-risky")
@@ -113,7 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code != 0:
+            _emit_diagnostic_identity()
+        raise
+
+    _emit_diagnostic_identity()
     try:
         return int(args.func(args))
     except SafetyError as exc:

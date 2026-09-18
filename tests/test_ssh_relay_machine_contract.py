@@ -100,53 +100,83 @@ class SshRelayMachineContractTests(unittest.TestCase):
         mode: str = "exec",
         receipt_path: str | None = None,
         verify_stdout: str = '{"service":"active"}',
+        main_updates: dict | None = None,
     ):
-        with tempfile.TemporaryDirectory() as td:
-            journal = Journal(Path(td))
-            calls: list[list[str]] = []
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        td = temp.name
+        journal = Journal(Path(td))
+        calls: list[list[str]] = []
 
-            def runner(args, _cwd, timeout=120):
-                self.assertEqual(120, timeout)
-                calls.append(list(args))
-                if "--risky" in args:
-                    transaction_id = args[args.index("--transaction-id") + 1]
-                    payload = main_builder(transaction_id)
-                    return {
-                        "launched": True,
-                        "returncode": _EXIT_BY_STATUS[payload["operation_status"]],
-                        "stdout": json.dumps(payload),
-                        "stderr": "LOCAL_SECRET_STDERR",
-                    }
-                payload = verify_payload(mode=mode, stdout=verify_stdout)
+        def runner(args, _cwd, timeout=120):
+            self.assertEqual(120, timeout)
+            calls.append(list(args))
+            if "--risky" in args:
+                transaction_id = args[args.index("--transaction-id") + 1]
+                payload = main_builder(transaction_id)
+                returncode = _EXIT_BY_STATUS[payload["operation_status"]]
+                payload.update(main_updates or {})
                 return {
                     "launched": True,
-                    "returncode": 0,
+                    "returncode": returncode,
                     "stdout": json.dumps(payload),
-                    "stderr": "",
+                    "stderr": "LOCAL_SECRET_STDERR",
                 }
+            payload = verify_payload(mode=mode, stdout=verify_stdout)
+            return {
+                "launched": True,
+                "returncode": 0,
+                "stdout": json.dumps(payload),
+                "stderr": "",
+            }
 
-            with patch.object(ssh_relay, "_run_machine", side_effect=runner):
-                record = ssh_relay.ssh_relay_risky(
-                    "ssh_relay",
-                    "systemctl restart app; printf COMMAND_SECRET >/dev/null",
-                    journal=journal,
-                    host_label="prod",
-                    reason="проверка машинного контракта",
-                    relay_name="prod",
-                    relay_mode=mode,
-                    receipt_path=receipt_path,
-                    expected_state_json=json.dumps(
-                        {
-                            "assertions": {"service": "active"},
-                            "declarations": {"operation": "restart"},
-                        }
-                    ),
-                    rollback_command="systemctl restart app-old; printf ROLLBACK_SECRET >/dev/null",
-                    verify_remote_command="cat /run/app-state.json",
-                    approved=True,
-                    allow_critical=False,
+        with patch.object(ssh_relay, "_run_machine", side_effect=runner):
+            record = ssh_relay.ssh_relay_risky(
+                "ssh_relay",
+                "systemctl restart app; printf COMMAND_SECRET >/dev/null",
+                journal=journal,
+                host_label="prod",
+                reason="проверка машинного контракта",
+                relay_name="prod",
+                relay_mode=mode,
+                receipt_path=receipt_path,
+                expected_state_json=json.dumps(
+                    {
+                        "assertions": {"service": "active"},
+                        "declarations": {"operation": "restart"},
+                    }
+                ),
+                rollback_command="systemctl restart app-old; printf ROLLBACK_SECRET >/dev/null",
+                verify_remote_command="cat /run/app-state.json",
+                approved=True,
+                allow_critical=False,
+            )
+        return record, journal, calls
+
+    def test_malformed_machine_fields_enter_recovery_without_retry(self):
+        for updates in (
+            {"operation_status": []},
+            {"receipt_status": {}},
+            {"command_exit_code": False},
+            {"command_exit_code": 0.0},
+            {"schema_version": True},
+            {"sudo": "false"},
+            {"session": "another-session"},
+        ):
+            with self.subTest(updates=updates):
+                record, journal, calls = self._run_case(
+                    lambda tx: risky_payload("succeeded", tx), main_updates=updates,
                 )
-            return record, journal, calls
+                self.assertEqual("unexpected", record.status.value)
+                self.assertTrue(journal.is_blocked())
+                self.assertEqual(1, sum("--risky" in call for call in calls))
+
+    def test_machine_output_uses_explicit_utf8(self):
+        result = subprocess.CompletedProcess(["ssh_relay"], 0, '{"text":"проверка"}', "")
+        with patch.object(ssh_relay.subprocess, "run", return_value=result) as run:
+            actual = ssh_relay._run_machine(["ssh_relay"], Path.cwd())
+        self.assertEqual("utf-8", run.call_args.kwargs["encoding"])
+        self.assertEqual('{"text":"проверка"}', actual["stdout"])
 
     def test_success_requires_receipt_and_verify(self):
         record, journal, calls = self._run_case(lambda tx: risky_payload("succeeded", tx))

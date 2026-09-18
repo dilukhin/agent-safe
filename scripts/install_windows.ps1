@@ -1,2 +1,2 @@
-python -m pip install --user -e .
-Write-Host "Installed. Make sure Python Scripts directory is in PATH, then run: safe --help"
+python -m pip install --user .
+Write-Host "Установлено. Убедитесь, что каталог Python Scripts входит в PATH, затем выполните: safe --help"

@@ -217,17 +217,19 @@ For Linux hosts via `ssh_relay`, store the receipt on the remote host with `--re
 ```bash
 safe ssh-relay-risky \
   --relay "py ssh_relay.py" \
+  --relay-mode sudo-exec \
   --relay-name prod \
   --host-label prod \
-  --remote-command "sudo -n apt-get install -y nginx" \
+  --remote-command "apt-get install -y nginx" \
+  --reason "согласованная установка nginx" \
   --expected-state-file expected-state.json \
   --rollback-command-file rollback.txt \
   --verify-remote-command "command that prints normalized JSON" \
-  --receipt-path ~/.local/state/agent-safe/changes.jsonl \
+  --receipt-path /var/lib/agent-safe/changes.jsonl \
   --approved
 ```
 
-`ssh-relay-risky` passes `--risky` to compatible `ssh_relay.py`, so the relay writes the remote receipt after the command succeeds. `--receipt-remote-command` remains available for older/custom transports or additional audit actions.
+`ssh-relay-risky` использует машинный контракт `ssh_relay` версии 0.9: передаёт `--json`, `--risky` и идентификатор транзакции. Проверка выполняется через тот же `exec`/`sudo-exec`, но без `--risky`. Для `sudo-exec` нужен явный абсолютный системный путь журнала; его родительский каталог должен быть доверенным. Отдельный `--receipt-remote-command` несовместим с этим контрактом. При частичном успехе или неизвестном результате включается Recovery Mode без автоматического повтора. Подробности: [адаптеры](docs/ADAPTERS.md).
 
 Посмотреть состояние safety-журнала:
 

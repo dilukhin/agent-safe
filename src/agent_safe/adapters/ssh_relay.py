@@ -80,7 +80,7 @@ def build_relay_command(
 
 def _run_machine(args: list[str], cwd: Path, timeout: int = 120) -> dict[str, Any]:
     try:
-        proc = subprocess.run(args, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+        proc = subprocess.run(args, cwd=str(cwd), encoding="utf-8", capture_output=True, timeout=timeout)
     except (FileNotFoundError, PermissionError) as exc:
         return {
             "launched": False,
@@ -165,14 +165,18 @@ def _parse_machine_payload(
         return payload, "relay_machine_session_mismatch"
 
     operation_status = payload.get("operation_status")
-    if operation_status not in _MACHINE_EXIT_CODES:
+    if not isinstance(operation_status, str) or operation_status not in _MACHINE_EXIT_CODES:
         return payload, "relay_machine_unknown_operation_status"
-    if run.get("returncode") != _MACHINE_EXIT_CODES[operation_status]:
+    if type(run.get("returncode")) is not int or run.get("returncode") != _MACHINE_EXIT_CODES[operation_status]:
         return payload, "relay_machine_process_code_mismatch"
 
     command_status = payload.get("command_status")
     command_exit_code = payload.get("command_exit_code")
     receipt_status = payload.get("receipt_status")
+    if not isinstance(receipt_status, str):
+        return payload, "relay_machine_receipt_status_type"
+    if command_exit_code is not None and type(command_exit_code) is not int:
+        return payload, "relay_machine_command_exit_type"
     if type(payload.get("partial_success")) is not bool:
         return payload, "relay_machine_partial_flag_type"
     partial_success = payload.get("partial_success")
