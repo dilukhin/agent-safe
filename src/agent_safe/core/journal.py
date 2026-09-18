@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,24 @@ class Journal:
         payload = {"reason": reason, "txn_id": txn_id}
         self.block_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def begin_pending(self, txn_id: str) -> None:
+        """Не даёт продолжить изменения после аварийного завершения процесса."""
+        with self.block_path.open("x", encoding="utf-8") as stream:
+            json.dump({"pending_txn_id": txn_id, "reason": "ожидается проверка действия"}, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def finish_pending(self, txn_id: str) -> bool:
+        """Снимает только собственный временный барьер после подтверждённого успеха."""
+        try:
+            payload = json.loads(self.block_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("pending_txn_id") != txn_id:
+                return False
+            self.block_path.unlink()
+        except (OSError, ValueError):
+            return False
+        return True
+
     def clear_block(self, reason: str) -> None:
         if self.block_path.exists():
             archive = self.safety_dir / "recovery" / f"cleared-{ActionRecord.new_id()}.json"
@@ -39,12 +58,15 @@ class Journal:
             self.block_path.unlink()
         self.append_raw({"event": "clear-block", "reason": reason})
 
-    def append(self, record: ActionRecord) -> None:
-        self.append_raw(record.to_dict())
+    def append(self, record: ActionRecord, *, durable: bool = False) -> None:
+        self.append_raw(record.to_dict(), durable=durable)
 
-    def append_raw(self, payload: dict[str, Any]) -> None:
+    def append_raw(self, payload: dict[str, Any], *, durable: bool = False) -> None:
         with self.journal_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
 
     def records(self) -> list[dict[str, Any]]:
         if not self.journal_path.exists():
@@ -70,6 +92,6 @@ class Journal:
         if txn_id == "last":
             return self.last_reversible(include_undone=True)
         for record in reversed(self.records()):
-            if record.get("txn_id") == txn_id:
+            if record.get("txn_id") == txn_id and "event" not in record:
                 return record
         return None

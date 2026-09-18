@@ -70,7 +70,13 @@ safe exec-risky \
   -- command arg1 arg2
 ```
 
-`exec-risky` отказывается работать без точной цели, причины, expected state, rollback и подтверждения. Если assertions непусты, verify обязателен. Ненулевой код основной или проверочной команды, неполная проверка и несовпадение переводят транзакцию в `unexpected` и создают `.agent-safety/INCIDENT_BLOCKED`.
+`exec-risky` отказывается работать без точной цели, причины, expected state, подтверждения и одного из двух вариантов восстановления: rollback-команды или явного `--recovery-contract-file`. Verify обязателен. Ненулевой код основной или проверочной команды, неполная проверка и несовпадение переводят транзакцию в `unexpected` и создают `.agent-safety/INCIDENT_BLOCKED`.
+
+Режим контрольной точки требует проверяемое свидетельство до изменения и не
+выполняет восстановление автоматически. Формат и ограничения описаны в
+[RECOVERY_CONTRACT.md](RECOVERY_CONTRACT.md). Эта альтернатива относится только
+к `exec-risky`; `system-change`, `yc-change` и `ssh-relay-risky` сохраняют свои
+требования к rollback-команде.
 
 ## Git adapter
 
