@@ -463,29 +463,136 @@ def fs_trash(path: Path, reason: str, journal: Journal) -> ActionRecord:
     return record
 
 
-def _do_move(source: Path, dest: Path) -> None:
-    if not source.exists():
-        raise SafetyError(f"rollback source does not exist: {source}")
-    if dest.exists():
-        raise SafetyError(f"rollback destination already exists: {dest}")
-    if not dest.parent.exists():
-        raise SafetyError(f"rollback destination parent does not exist: {dest.parent}")
-    shutil.move(str(source), str(dest))
+def _reversal_context(record: dict[str, Any], journal: Journal, event: str):
+    """Берёт состояние из журнала, включая уже выполненные обратные шаги."""
+    txn_id = record.get("txn_id")
+    original = journal.find(txn_id) if isinstance(txn_id, str) else None
+    if not original or original.get("kind") not in {"fs.move", "fs.trash"}:
+        raise SafetyError("undo/redo поддерживают только записанные файловые перемещения")
+    state = original.get("status")
+    evidence = (original.get("verify_result") or {}).get("dest_identity")
+    before = (original.get("metadata") or {}).get("before") or {}
+    digest = (before.get("source", before)).get("sha256")
+    for item in journal.records():
+        if item.get("txn_id") == txn_id and item.get("event") in {"undo", "redo"}:
+            state = item.get("status")
+            verification = item.get("verify_result") or {}
+            evidence = verification.get("dest_identity")
+            digest = verification.get("sha256")
+    required = Status.DONE.value if event == "undo" else Status.UNDONE.value
+    if state != required:
+        raise SafetyError(f"недопустимый переход {event}: состояние транзакции {state}")
+    if not isinstance(evidence, dict) or any(key not in evidence for key in _IDENTITY_FIELDS):
+        raise SafetyError("в журнале недостаточно сведений об объекте; нужно ручное восстановление")
+    return original, evidence, digest
+
+
+def _reversal_parent(original: dict[str, Any], event: str) -> dict[str, Any]:
+    preflight = (original.get("metadata") or {}).get("preflight") or {}
+    if event == "undo":
+        chain = (preflight.get("source_initial") or {}).get("chain") or []
+        parent = chain[-2] if len(chain) >= 2 else None
+    else:
+        parent = ((preflight.get("dest_initial") or {}).get("parent") or {}).get("leaf")
+    if not isinstance(parent, dict):
+        raise SafetyError("не записана идентичность родителя назначения; нужно ручное восстановление")
+    return parent
+
+
+def _reverse_move(record: dict[str, Any], journal: Journal, event: str) -> dict[str, Any]:
+    # Восстановление при инциденте не должно быть скрытым обходом общего барьера.
+    require_not_blocked(journal)
+    original, expected_identity, expected_digest = _reversal_context(record, journal, event)
+    operation = original.get(event) or {}
+    if operation.get("op") != "move":
+        raise SafetyError("undo/redo не исполняют произвольные команды")
+    if any(not isinstance(operation.get(key), str) or not operation[key] for key in ("source", "dest")):
+        raise SafetyError("неполные пути файлового восстановления")
+    requested_source, source = _requested_path(Path(operation["source"]), "источник восстановления")
+    requested_dest, dest = _requested_path(Path(operation["dest"]), "назначение восстановления")
+    _guard_no_overlap(source, dest)
+    source_initial = _preflight_existing_path(source, requested=requested_source, role="источник восстановления")
+    dest_initial = _preflight_destination(dest, requested=requested_dest, role="назначение восстановления")
+    if not _same_leaf_identity({"leaf": expected_identity}, source_initial):
+        raise SafetyError("объект восстановления изменился после записанного перемещения")
+    expected_parent = _reversal_parent(original, event)
+    actual_parent = dest_initial["parent"]["leaf"]
+    # Время и размер каталога меняются при штатном перемещении его ребёнка.
+    parent_fields = ("device", "inode", "kind", "mode", "file_attributes", "reparse_tag")
+    if any(key not in expected_parent or expected_parent[key] != actual_parent.get(key) for key in parent_fields):
+        raise SafetyError("родитель назначения заменён после исходного перемещения")
+    kind = source_initial["leaf"]["kind"]
+    if kind not in {"file", "directory"}:
+        raise SafetyError("восстановление поддерживает только обычные файлы и каталоги")
+    if kind == "file":
+        if not isinstance(expected_digest, str) or _hash_file(source) != expected_digest:
+            raise SafetyError("содержимое файла восстановления не совпадает с журналом")
+
+    txn_id = original["txn_id"]
+    operation_id = ActionRecord.new_id()
+    # Барьер создаётся до повторной проверки и остаётся при аварии процесса.
+    try:
+        journal.begin_pending(txn_id)
+    except OSError as exc:
+        raise SafetyError("не удалось установить барьер восстановления; действие не запущено") from exc
+    try:
+        _recheck_existing(source_initial, source, requested=requested_source, role="источник восстановления")
+        _recheck_destination(dest_initial, dest, requested=requested_dest, role="назначение восстановления")
+        journal.append_raw({
+            "event": f"{event}.planned", "txn_id": txn_id, "operation_id": operation_id,
+            "source": str(source), "dest": str(dest),
+            "expected_state": {"source_exists": False, "dest_exists": True},
+            "source_identity": source_initial["leaf"],
+        }, durable=True)
+    except (Exception, KeyboardInterrupt) as exc:
+        # Изменение цели ещё не начиналось. Незавершённый барьер сохраняется
+        # для явной диагностики, если подготовка оборвалась после его создания.
+        raise SafetyError("подготовка восстановления прервана; действие не запущено, требуется диагностика") from exc
+
+    mutation_error = None
+    try:
+        shutil.move(str(source), str(dest))
+    except (Exception, KeyboardInterrupt) as exc:
+        mutation_error = f"{type(exc).__name__}: {exc}"
+    try:
+        verify, status = _verify_move_result(source, dest, mutation_error)
+        if status == Status.DONE:
+            if verify["dest_identity"]["kind"] != kind:
+                status = Status.UNEXPECTED
+                verify["error"] = "тип результата восстановления изменился"
+            elif kind == "file":
+                verify["sha256"] = _hash_file(dest)
+                if verify["sha256"] != expected_digest:
+                    status = Status.UNEXPECTED
+                    verify["error"] = "содержимое результата восстановления не совпало"
+    except (Exception, KeyboardInterrupt) as exc:
+        verify = {"error": f"{type(exc).__name__}: {exc}"}
+        status = Status.UNEXPECTED
+    success_status = Status.UNDONE.value if event == "undo" else Status.DONE.value
+    result = {
+        "event": event, "txn_id": txn_id, "operation_id": operation_id,
+        "source": str(source), "dest": str(dest),
+        "status": success_status if status == Status.DONE else Status.UNEXPECTED.value,
+        "verification_complete": status == Status.DONE, "verify_result": verify,
+    }
+    if status == Status.UNEXPECTED:
+        journal.block(f"неожиданный результат файлового {event}", txn_id)
+    # Если запись результата не удаётся, ранее установленный барьер остаётся.
+    journal.append_raw(result, durable=True)
+    if status == Status.UNEXPECTED:
+        raise SafetyError("восстановление не подтверждено; включён Recovery Mode")
+    if not journal.finish_pending(txn_id):
+        result.update(status=Status.UNEXPECTED.value, verification_complete=False)
+        result["verify_result"]["barrier_error"] = True
+        journal.block("не удалось завершить барьер файлового восстановления", txn_id)
+        journal.append_raw(result, durable=True)
+        raise SafetyError("барьер восстановления не завершён; включён Recovery Mode")
+    return {"undone" if event == "undo" else "redone": txn_id}
 
 
 def undo_record(record: dict[str, Any], journal: Journal) -> dict[str, Any]:
-    undo = record.get("undo") or {}
-    if undo.get("op") != "move":
-        raise SafetyError(f"unsupported undo operation: {undo}")
-    _do_move(Path(undo["source"]), Path(undo["dest"]))
-    journal.append_raw({"event": "undo", "txn_id": record.get("txn_id"), "status": Status.UNDONE.value})
-    return {"undone": record.get("txn_id")}
+    return _reverse_move(record, journal, "undo")
 
 
 def redo_record(record: dict[str, Any], journal: Journal) -> dict[str, Any]:
-    redo = record.get("redo") or {}
-    if redo.get("op") != "move":
-        raise SafetyError(f"unsupported redo operation: {redo}")
-    _do_move(Path(redo["source"]), Path(redo["dest"]))
-    journal.append_raw({"event": "redo", "txn_id": record.get("txn_id"), "status": Status.DONE.value})
-    return {"redone": record.get("txn_id")}
+    return _reverse_move(record, journal, "redo")
