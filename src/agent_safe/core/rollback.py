@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -212,3 +213,56 @@ def resolved_spec(manifest: dict[str, Any], role: str, journal: Journal) -> dict
     root = bundle_path(journal, manifest["source_txn_id"]) / "artifacts"
     spec["argv"] = [str(root / arg["artifact"]) if isinstance(arg, dict) else arg for arg in spec["argv"]]
     return spec
+
+
+@dataclass(frozen=True)
+class PreparedArtifact:
+    artifact_id: str
+    path: str
+    size_bytes: int
+    sha256: str
+    object_identity: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PreparedProcess:
+    """Внутренние факты исполнения, НЕ разрешение и НЕ wire schema identity."""
+
+    source_txn_id: str
+    attempt_txn_id: str
+    role: str
+    manifest_sha256: str
+    program: str
+    argv: tuple[str, ...]
+    cwd: str
+    timeout_seconds: int
+    stdin_utf8: str | None
+    program_identity: tuple[int, ...]
+    cwd_identity: tuple[int, ...]
+    artifacts: tuple[PreparedArtifact, ...]
+
+
+def prepare_process(*, journal: Journal, txn_id: str, recovery: dict[str, Any],
+                    plan_raw: str, attempt_txn_id: str, role: str) -> PreparedProcess:
+    """Граница выдачи снимка: проверенный комплект и уже раскрытые artifact-ссылки."""
+    if role not in {"process", "verify"}:
+        raise SafetyError("неподдерживаемая роль подготовленного процесса")
+    manifest = load_bundle(journal=journal, txn_id=txn_id, recovery=recovery, plan_raw=plan_raw)
+    spec = resolved_spec(manifest, role, journal)
+    root = bundle_path(journal, txn_id) / "artifacts"
+    artifacts = tuple(PreparedArtifact(
+        name, str(root / name), facts["size_bytes"], facts["sha256"],
+        tuple(identity(checked_path(root / name))),
+    ) for name, facts in sorted(manifest["artifacts"].items()))
+    context = manifest["context"][role]
+    return PreparedProcess(
+        txn_id, attempt_txn_id, role, digest(encoded(manifest)), spec["program"],
+        tuple(spec["argv"]), spec["cwd"], spec["timeout_seconds"], spec.get("stdin_utf8"),
+        tuple(context["program"]), tuple(context["cwd"]), artifacts,
+    )
+
+
+def revalidate_process(prepared: PreparedProcess, **context: Any) -> None:
+    # Свежие факты служат только для сравнения: ими нельзя заменить подготовленный вызов.
+    if prepare_process(**context) != prepared:
+        raise SafetyError("подготовленный вызов изменился; требуется новое рассмотрение")

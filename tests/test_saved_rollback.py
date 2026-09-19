@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_safe.adapters.exec_adapter import _run, exec_risky
@@ -18,7 +20,7 @@ from agent_safe.cli import main
 from agent_safe.core.journal import Journal
 from agent_safe.core.models import Status
 from agent_safe.core.process_spec import read_regular, strict_object
-from agent_safe.core.rollback import local_journal
+from agent_safe.core.rollback import local_journal, prepare_process
 
 
 class SavedRollbackTests(unittest.TestCase):
@@ -180,7 +182,10 @@ class SavedRollbackTests(unittest.TestCase):
         cases = []
         for key, value in (("schema_version", True), ("target", "relative"), ("extra", 1), ("artifacts", [])):
             cases.append(dict(self.plan, **{key: value}))
-        for key, value in (("shell", True), ("timeout_seconds", True), ("cwd", "relative"), ("program", "cmd.exe"),
+        for key, value in (("shell", True), ("timeout_seconds", True), ("timeout_seconds", 1.5),
+                           ("timeout_seconds", 0), ("timeout_seconds", 3601), ("unknown", "value"),
+                           ("env_dependencies", {}), ("stdin_utf8", None),
+                           ("cwd", "relative"), ("program", "cmd.exe"),
                            ("argv", ["-c", "code"]), ("env_dependencies", ["TOKEN"]), ("argv", ["-I", {"artifact":"missing"}])):
             plan = copy.deepcopy(self.plan)
             plan["process"][key] = value
@@ -356,6 +361,137 @@ class SavedRollbackTests(unittest.TestCase):
         helper.write_text("import time\ntime.sleep(10)\n", encoding="utf-8")
         result = _run([sys.executable, "-I", str(helper)], self.root, timeout=1, structured=True)
         self.assertEqual(result["outcome"], "unknown")
+
+    def test_structured_stdin_exact_bytes_and_eof_on_both_platforms(self):
+        helper = self.root / "bytes.py"
+        helper.write_text(
+            "import sys,json,os,stat\n"
+            "data=sys.stdin.buffer.read()\n"
+            "print(json.dumps({'hex':data.hex(),'pipe':stat.S_ISFIFO(os.fstat(0).st_mode),"
+            "'eof':sys.stdin.buffer.read(1)==b''}))\n", encoding="utf-8")
+        for value in ("line1\nline2\n", "line1\r\nline2\r\n", "\r\n\n\r", "Русский 😀\n雪\r\n", "", None):
+            with self.subTest(stdin=value):
+                result = _run([sys.executable, "-I", str(helper)], self.root,
+                              structured=True, stdin_utf8=value)
+                self.assertEqual(result["outcome"], "exited")
+                self.assertEqual(result["returncode"], 0, result)
+                self.assertEqual(json.loads(result["stdout"]), {
+                    "hex": (value.encode("utf-8") if value is not None else b"").hex(),
+                    "pipe": value is not None, "eof": True,
+                })
+
+    def test_invalid_stdin_encoding_refused_before_spawn(self):
+        with patch("agent_safe.adapters.exec_adapter.subprocess.Popen") as spawn:
+            result = _run([sys.executable], self.root, structured=True, stdin_utf8="\ud800")
+        spawn.assert_not_called()
+        self.assertEqual(result["outcome"], "not_started")
+
+    def test_structured_output_is_strict_utf8(self):
+        for data, outcome in ((b'\xff', "unknown"), ("雪\r\n".encode(), "exited")):
+            with self.subTest(data=data):
+                result = _run([sys.executable, "-I", "-c", "import sys;sys.stdout.buffer.write("+repr(data)+")"],
+                              self.root, structured=True)
+                self.assertEqual(result["outcome"], outcome)
+                if outcome == "exited":
+                    self.assertEqual(result["stdout"], "雪\r\n")
+
+    def test_prepared_facts_are_resolved_immutable_and_separate_by_role(self):
+        source = self.source()
+        context = dict(journal=self.journal, txn_id=source.txn_id,
+                       recovery=source.metadata["recovery"], plan_raw=json.dumps(self.plan),
+                       attempt_txn_id="test-attempt")
+        process = prepare_process(role="process", **context)
+        verify = prepare_process(role="verify", **context)
+        self.assertNotEqual(process, verify)
+        self.assertEqual(process.argv[0], "-I")
+        self.assertEqual(process.argv[1], str(self.bundle(source) / "artifacts" / "restore"))
+        self.assertEqual(process.program, str(Path(sys.executable).resolve()))
+        self.assertEqual(process.stdin_utf8, None)
+        self.assertEqual({a.artifact_id for a in process.artifacts}, {"backup", "restore", "check"})
+        with self.assertRaises(FrozenInstanceError):
+            process.argv = ("changed",)
+        with self.assertRaises(FrozenInstanceError):
+            process.artifacts[0].sha256 = "changed"
+        with self.assertRaises(SafetyError):
+            prepare_process(role="main", **context)
+
+    def test_changed_prepared_inputs_refused_before_recovery_spawn(self):
+        source = self.source()
+        previous = None
+        # Подменяем снимок между подготовкой и исполнением, не реальный системный Python.
+        for field, value in (("argv", ("-I", "changed.py")), ("stdin_utf8", ""),
+                             ("stdin_utf8", "changed\r\n"), ("program", str(self.script)),
+                             ("cwd", str(self.root / "other")), ("timeout_seconds", 6),
+                             ("role", "verify"), ("attempt_txn_id", "foreign-attempt"),
+                             ("source_txn_id", "foreign-source")):
+            def altered(**context):
+                prepared = prepare_process(**context)
+                return replace(prepared, **{field: value}) if context["role"] == "process" else prepared
+            with self.subTest(field=field, value=value), \
+                    patch("agent_safe.adapters.recover.prepare_process", side_effect=altered), \
+                    patch("agent_safe.adapters.recover._run") as run:
+                result = self.restore(source, retry_after=previous)
+            run.assert_not_called()
+            self.assertEqual(result.status, Status.FAILED)
+            self.assertTrue(self.journal.is_blocked())
+            previous = result.txn_id
+
+    def test_same_bytes_artifact_replacement_after_preparation_stops_spawn(self):
+        source = self.source()
+        append = self.journal.append
+        def substitute(record, **kwargs):
+            append(record, **kwargs)
+            if record.status == Status.PLANNED:
+                artifact = self.bundle(source) / "artifacts" / "backup"
+                replacement = self.root / "replacement"
+                replacement.write_bytes(artifact.read_bytes())
+                replacement.replace(artifact)
+        with patch.object(self.journal, "append", side_effect=substitute), \
+                patch("agent_safe.adapters.recover._run") as run:
+            result = self.restore(source)
+        run.assert_not_called()
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertTrue(self.journal.is_blocked())
+
+    def test_cwd_replacement_after_preparation_stops_spawn(self):
+        cwd = self.root / "work"
+        cwd.mkdir()
+        self.plan["process"]["cwd"] = str(cwd)
+        source = self.source()
+        append = self.journal.append
+        def substitute(record, **kwargs):
+            append(record, **kwargs)
+            if record.status == Status.PLANNED:
+                cwd.rename(self.root / "old-work")
+                cwd.mkdir()
+        with patch.object(self.journal, "append", side_effect=substitute), \
+                patch("agent_safe.adapters.recover._run") as run:
+            result = self.restore(source)
+        run.assert_not_called()
+        self.assertEqual(result.status, Status.FAILED)
+
+    def test_executable_metadata_drift_after_preparation_stops_spawn(self):
+        from agent_safe.core.rollback import checked_path
+        source = self.source()
+        append = self.journal.append
+        changed = False
+        def substitute(record, **kwargs):
+            nonlocal changed
+            append(record, **kwargs)
+            changed = record.status == Status.PLANNED
+        def observe(path, **kwargs):
+            info = checked_path(path, **kwargs)
+            if changed and path == Path(sys.executable).resolve():
+                values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                values["st_mtime_ns"] += 1
+                return SimpleNamespace(**values)
+            return info
+        with patch.object(self.journal, "append", side_effect=substitute), \
+                patch("agent_safe.core.rollback.checked_path", side_effect=observe), \
+                patch("agent_safe.adapters.recover._run") as run:
+            result = self.restore(source)
+        run.assert_not_called()
+        self.assertEqual(result.status, Status.FAILED)
 
     def test_storage_permissions_on_posix(self):
         if os.name == "nt":
