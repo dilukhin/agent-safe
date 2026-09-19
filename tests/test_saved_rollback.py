@@ -17,7 +17,7 @@ from agent_safe.adapters.recover import recover
 from agent_safe.cli import main
 from agent_safe.core.journal import Journal
 from agent_safe.core.models import Status
-from agent_safe.core.process_spec import strict_object
+from agent_safe.core.process_spec import read_regular, strict_object
 from agent_safe.core.rollback import local_journal
 
 
@@ -217,6 +217,23 @@ class SavedRollbackTests(unittest.TestCase):
         self.assertEqual(source.status, Status.FAILED)
         self.assertFalse(self.journal.is_blocked())
         self.assert_no_restore(source)
+
+    def test_not_started_with_unobservable_target_keeps_block(self):
+        def execute(*args, **kwargs):
+            self.target.unlink()
+            self.target.mkdir()
+            return {"outcome": "not_started", "returncode": 127}
+        source = self.source(execute)
+        self.assertEqual(source.status, Status.UNEXPECTED)
+        self.assertEqual(source.verify_result["verification_error_code"], "target_observation_failed")
+        self.assertTrue(self.journal.is_blocked())
+
+    def test_path_and_descriptor_metadata_agree_for_supported_files(self):
+        for name in ("ordinary.bin", "script.py", "executable.exe"):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.write_bytes(b"known bytes")
+                self.assertEqual(read_regular(path), b"known bytes")
 
     def test_legacy_undo_redo_do_not_execute_plan(self):
         source = self.source()

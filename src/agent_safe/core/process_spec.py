@@ -108,6 +108,19 @@ def directory_identity(path: Path) -> list[int]:
             getattr(info, "st_file_attributes", 0), getattr(info, "st_reparse_tag", 0)]
 
 
+def opened_matches(path_info: os.stat_result, opened_info: os.stat_result) -> bool:
+    if os.name != "nt":
+        return identity(path_info) == identity(opened_info)
+    # Windows: lstat сохраняет старую семантику ctime (создание), а fstat
+    # в новых Python может возвращать время изменения метаданных. Кроме того,
+    # биты исполнения lstat вычисляет из расширения имени, недоступного fstat.
+    def comparable(info):
+        return [info.st_dev, info.st_ino, info.st_mode & ~0o111, info.st_size,
+                info.st_mtime_ns, getattr(info, "st_birthtime_ns", info.st_ctime_ns),
+                getattr(info, "st_file_attributes", 0)]
+    return comparable(path_info) == comparable(opened_info)
+
+
 def read_regular(path: Path, limit: int = FILE_LIMIT) -> bytes:
     before = checked_path(path)
     if before is None or not stat.S_ISREG(before.st_mode) or before.st_size > limit:
@@ -115,12 +128,13 @@ def read_regular(path: Path, limit: int = FILE_LIMIT) -> bytes:
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         with os.fdopen(os.open(path, flags), "rb") as stream:
-            if identity(os.fstat(stream.fileno())) != identity(before):
+            opened = os.fstat(stream.fileno())
+            if not opened_matches(before, opened):
                 raise SafetyError("файл подменён при открытии")
             raw = stream.read(limit + 1)
             after = os.fstat(stream.fileno())
         current = checked_path(path)
-        if (len(raw) > limit or identity(after) != identity(before)
+        if (len(raw) > limit or identity(after) != identity(opened)
                 or current is None or identity(current) != identity(before)):
             raise SafetyError("файл изменился во время чтения")
         return raw

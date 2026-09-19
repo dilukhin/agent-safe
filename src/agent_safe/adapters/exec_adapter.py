@@ -264,7 +264,9 @@ def exec_risky(
             recovery["target_state"] = None
             status = Status.UNEXPECTED
             verification = failed_verification(expected_state.assertions, "target_observation_failed", "цель после действия недоступна для безопасного наблюдения")
-        if result.get("outcome") == "not_started":
+            verify_result["verification_error_code"] = verification.error_code
+            verify_result["verification_error_message"] = verification.error_message
+        if result.get("outcome") == "not_started" and recovery["target_state"] is not None:
             status = Status.FAILED
     record = ActionRecord(
         txn_id=txn_id,
