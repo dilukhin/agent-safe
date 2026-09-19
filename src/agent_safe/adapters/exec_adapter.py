@@ -33,17 +33,20 @@ def _run(args: list[str], cwd: Path, timeout: int = 120, *, structured: bool = F
     result: dict[str, Any] = {"args": args, "display": _display_command(args)}
     options: dict[str, Any] = {}
     if structured:
-        options.update(encoding="utf-8", errors="strict",
-                       stdin=subprocess.PIPE if stdin_utf8 is not None else subprocess.DEVNULL)
+        options["stdin"] = subprocess.PIPE if stdin_utf8 is not None else subprocess.DEVNULL
     try:
-        proc = subprocess.Popen(args, cwd=str(cwd), text=True, stdout=subprocess.PIPE,
+        # Кодируем до spawn; бинарный канал не меняет LF/CRLF на Windows.
+        input_data = stdin_utf8.encode("utf-8") if structured and stdin_utf8 is not None else stdin_utf8
+        proc = subprocess.Popen(args, cwd=str(cwd), text=not structured, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, shell=False, **options)
     except (OSError, ValueError) as exc:
         return dict(result, outcome="not_started", error=type(exc).__name__, returncode=127)
     except (Exception, KeyboardInterrupt) as exc:
         return dict(result, outcome="unknown", error=type(exc).__name__, returncode=127)
     try:
-        stdout, stderr = proc.communicate(input=stdin_utf8, timeout=timeout)
+        stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
+        if structured:
+            stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
         return dict(result, outcome="exited", returncode=proc.returncode,
                     stdout=stdout[-50000:], stderr=stderr[-50000:],
                     stdout_truncated=len(stdout) > 50000, stderr_truncated=len(stderr) > 50000)

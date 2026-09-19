@@ -12,7 +12,8 @@ from agent_safe.core.models import ActionRecord, Risk, Status
 from agent_safe.core.process_spec import read_json_file, strict_object
 from agent_safe.core.risk import assess_command
 from agent_safe.core.rollback import (
-    check_storage, encoded, load_bundle, resolved_spec, sync_directory, target_state, write_new,
+    check_storage, encoded, load_bundle, prepare_process, revalidate_process,
+    sync_directory, target_state, write_new,
 )
 from agent_safe.core.verification import failed_verification, verify_stdout
 
@@ -62,8 +63,12 @@ def recover(*, journal: Journal, source_id: str, plan_raw: str, approved: bool,
         raise SafetyError("нет попытки, соответствующей --retry-after")
     if expected_target is None or target_state(target, journal) != expected_target:
         raise SafetyError("цель или её родитель изменились; требуется отдельный разбор восстановления")
-    process = resolved_spec(manifest, "process", journal)
-    args = [process["program"], *process["argv"]]
+    txn_id = ActionRecord.new_id()
+    context = dict(journal=journal, txn_id=source_id, recovery=recovery,
+                   plan_raw=plan_raw, attempt_txn_id=txn_id)
+    process = prepare_process(role="process", **context)
+    verify = prepare_process(role="verify", **context)
+    args = [process.program, *process.argv]
     assessment = assess_command(_display_command(args), channel="local")
     if (assessment.risk == Risk.CRITICAL or source.get("risk") == "critical") and not allow_critical:
         raise SafetyError("критическое восстановление требует отдельного --allow-critical")
@@ -74,11 +79,10 @@ def recover(*, journal: Journal, source_id: str, plan_raw: str, approved: bool,
             journal.begin_pending(source_id)
         except OSError as exc:
             raise SafetyError("не удалось установить барьер восстановления") from exc
-    txn_id = ActionRecord.new_id()
     lock = journal.safety_dir / "recovery" / "ACTIVE.json"
     record = ActionRecord(
         txn_id=txn_id, status=Status.PLANNED, kind="local.recovery", risk=assessment.risk,
-        reason=reason, cwd=process["cwd"], target_paths=[target],
+        reason=reason, cwd=process.cwd, target_paths=[target],
         command={"channel": "local", "operation": "saved-rollback"},
         expected_state=manifest["plan"]["expected_state"],
         metadata={"parent_txn_id": source_id, "manifest_sha256": recovery["manifest_sha256"],
@@ -95,18 +99,17 @@ def recover(*, journal: Journal, source_id: str, plan_raw: str, approved: bool,
     verify_result = None
     try:
         _matching_block(journal, source_id)
-        load_bundle(journal=journal, txn_id=source_id, recovery=recovery, plan_raw=plan_raw)
         if target_state(target, journal) != expected_target:
             raise SafetyError("цель изменилась перед запуском восстановления")
-        result = _run(args, Path(process["cwd"]), timeout=process["timeout_seconds"],
-                      structured=True, stdin_utf8=process.get("stdin_utf8"))
+        revalidate_process(process, role="process", **context)
+        result = _run([process.program, *process.argv], Path(process.cwd), timeout=process.timeout_seconds,
+                      structured=True, stdin_utf8=process.stdin_utf8)
         if result.get("returncode") == 0 and result.get("outcome") == "exited":
             _matching_block(journal, source_id)
-            load_bundle(journal=journal, txn_id=source_id, recovery=recovery, plan_raw=plan_raw)
-            spec = resolved_spec(manifest, "verify", journal)
-            verify_result = _run([spec["program"], *spec["argv"]], Path(spec["cwd"]),
-                                 timeout=spec["timeout_seconds"], structured=True,
-                                 stdin_utf8=spec.get("stdin_utf8"))
+            revalidate_process(verify, role="verify", **context)
+            verify_result = _run([verify.program, *verify.argv], Path(verify.cwd),
+                                 timeout=verify.timeout_seconds, structured=True,
+                                 stdin_utf8=verify.stdin_utf8)
             if (verify_result.get("returncode") == 0 and verify_result.get("outcome") == "exited"
                     and not verify_result.get("stdout_truncated")):
                 strict_object(verify_result.get("stdout", ""))
