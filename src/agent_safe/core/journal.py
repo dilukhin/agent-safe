@@ -52,6 +52,9 @@ class Journal:
         return True
 
     def clear_block(self, reason: str) -> None:
+        if os.path.lexists(self.safety_dir / "recovery" / "ACTIVE.json"):
+            from agent_safe.adapters.fs import SafetyError
+            raise SafetyError("есть незавершённое восстановление; снятие блокировки требует ручного разбора ACTIVE.json")
         if self.block_path.exists():
             archive = self.safety_dir / "recovery" / f"cleared-{ActionRecord.new_id()}.json"
             archive.write_text(self.block_path.read_text(encoding="utf-8"), encoding="utf-8")
