@@ -9,6 +9,9 @@ from pathlib import Path
 
 from . import __version__
 from .adapters.exec_adapter import exec_readonly, exec_risky
+from .adapters.recover import recover
+from .core.process_spec import read_json_file
+from .core.rollback import local_journal
 from .adapters.fs import SafetyError, fs_move, fs_trash, redo_record, undo_record
 from .adapters.git import git_checkpoint, git_clean_preview
 from .adapters.ssh_relay import ssh_relay_readonly, ssh_relay_risky
@@ -179,11 +182,15 @@ def cmd_exec_readonly(args: argparse.Namespace) -> int:
 
 
 def cmd_exec_risky(args: argparse.Namespace) -> int:
-    journal = Journal(Path(args.root) if args.root else None)
+    factory = local_journal if args.rollback_plan_file else Journal
+    journal = factory(Path(args.root) if args.root else None)
     expected_state = _choose_arg(args.expected_state, args.expected_state_file, "expected-state", required=True)
     rollback_command = _choose_arg(args.rollback_command, args.rollback_command_file, "rollback-command")
     if args.recovery_contract_file and (args.rollback_command is not None or args.rollback_command_file is not None):
         raise SafetyError("--recovery-contract-file несовместим с rollback-командой")
+    if args.rollback_plan_file and (args.recovery_contract_file or args.rollback_command is not None or args.rollback_command_file is not None):
+        raise SafetyError("--rollback-plan-file несовместим с другими источниками отката")
+    rollback_plan = read_json_file(Path(args.rollback_plan_file).absolute()) if args.rollback_plan_file else None
     try:
         recovery_contract = _read_text_arg(args.recovery_contract_file)
     except (OSError, UnicodeError) as exc:
@@ -200,12 +207,23 @@ def cmd_exec_risky(args: argparse.Namespace) -> int:
         expected_state_json=expected_state or "",
         rollback_command=rollback_command or "",
         recovery_contract_json=recovery_contract,
+        rollback_plan_json=rollback_plan,
         verify_command=verify_command,
         receipt_command=receipt_command,
         approved=args.approved,
         allow_critical=args.allow_critical,
         timeout=args.timeout,
     )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    journal = local_journal(Path(args.root) if args.root else None)
+    record = recover(journal=journal, source_id=args.txn_id,
+                     plan_raw=read_json_file(Path(args.plan_file).absolute()),
+                     approved=args.approved, reason=args.reason,
+                     allow_critical=args.allow_critical, retry_after=args.retry_after)
     print_json(record.to_dict())
     return 0 if record.status.value == "done" else 3
 
@@ -386,6 +404,13 @@ def cmd_recovery_plan(args: argparse.Namespace) -> int:
             "Отдельно согласовать ручное или специализированное восстановление; undo/redo здесь не выполняются.",
         ]
         plan["recovery_contract"] = recovery["contract"]
+    elif recovery.get("mode") == "saved-rollback":
+        plan["saved_rollback"] = recovery
+        plan["steps"] = [
+            "Проверить точную цель, сохранённый plan.json и зависимости комплекта.",
+            "Согласовать отдельное восстановление и вызвать recover с точным --txn-id и --plan-file.",
+            "Проверить результат; исходную блокировку снять отдельно после ручного разбора.",
+        ]
     print_json(plan)
     return 0
 
@@ -457,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rollback-command")
     p.add_argument("--rollback-command-file", help="file containing rollback command text")
     p.add_argument("--recovery-contract-file", help="UTF-8 JSON плана восстановления через контрольную точку вместо rollback-команды")
+    p.add_argument("--rollback-plan-file", help="UTF-8 JSON локального отката с сохраняемыми файлами зависимостей")
     p.add_argument("--verify-command")
     p.add_argument("--verify-command-file", help="file containing verification command text")
     p.add_argument("--receipt-command", help="command that records the completed change on the target side")
@@ -568,6 +594,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("clear-block", help="Clear INCIDENT_BLOCKED after manual review/recovery")
     p.add_argument("--reason", required=True)
     p.set_defaults(func=cmd_clear_block)
+
+    p = sub.add_parser("recover", help="Явно выполнить сохранённый локальный откат и проверить его результат")
+    p.add_argument("--txn-id", required=True, help="точная исходная транзакция")
+    p.add_argument("--plan-file", required=True, help="исходный план или сохранённый plan.json")
+    p.add_argument("--reason", required=True, help="обоснование отдельно согласованного восстановления")
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.add_argument("--retry-after", help="точная завершённая неуспешная попытка после отдельного разбора")
+    p.set_defaults(func=cmd_recover)
 
     p = sub.add_parser("receipt-command", help="Print a shell command that appends one JSONL change receipt")
     p.add_argument("--format", choices=["posix", "powershell"], default="posix")

@@ -10,6 +10,7 @@ from agent_safe.core.journal import Journal
 from agent_safe.core.models import ActionRecord, Risk, Status
 from agent_safe.core.risk import assess_command
 from agent_safe.core.recovery import validate_recovery_contract
+from agent_safe.core.rollback import load_bundle, prepare_bundle, target_state
 from agent_safe.core.verification import (
     VerificationError,
     VerificationOutcome,
@@ -27,18 +28,40 @@ def _display_command(args: list[str]) -> str:
     return " ".join(shlex.quote(str(a)) for a in args)
 
 
-def _run(args: list[str], cwd: Path, timeout: int = 120) -> dict[str, Any]:
+def _run(args: list[str], cwd: Path, timeout: int = 120, *, structured: bool = False,
+         stdin_utf8: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {"args": args, "display": _display_command(args)}
+    options: dict[str, Any] = {}
+    if structured:
+        options.update(encoding="utf-8", errors="strict",
+                       stdin=subprocess.PIPE if stdin_utf8 is not None else subprocess.DEVNULL)
     try:
-        proc = subprocess.run(args, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
-        return {
-            "args": args,
-            "display": _display_command(args),
-            "returncode": proc.returncode,
-            "stdout": proc.stdout[-50000:],
-            "stderr": proc.stderr[-50000:],
-        }
-    except Exception as exc:  # noqa: BLE001 - safety wrapper must report failures as data
-        return {"args": args, "display": _display_command(args), "error": repr(exc), "returncode": 127}
+        proc = subprocess.Popen(args, cwd=str(cwd), text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, shell=False, **options)
+    except (OSError, ValueError) as exc:
+        return dict(result, outcome="not_started", error=type(exc).__name__, returncode=127)
+    except (Exception, KeyboardInterrupt) as exc:
+        return dict(result, outcome="unknown", error=type(exc).__name__, returncode=127)
+    try:
+        stdout, stderr = proc.communicate(input=stdin_utf8, timeout=timeout)
+        return dict(result, outcome="exited", returncode=proc.returncode,
+                    stdout=stdout[-50000:], stderr=stderr[-50000:],
+                    stdout_truncated=len(stdout) > 50000, stderr_truncated=len(stderr) > 50000)
+    except (Exception, KeyboardInterrupt) as exc:
+        # Завершение родителя не доказывает остановку потомков или внешних действий.
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return dict(result, outcome="unknown", error=type(exc).__name__, returncode=127)
+    finally:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def _unquote_windows_token(token: str) -> str:
@@ -116,6 +139,7 @@ def exec_risky(
     expected_state_json: str,
     rollback_command: str | None = None,
     recovery_contract_json: str | None = None,
+    rollback_plan_json: str | None = None,
     verify_command: str | None = None,
     receipt_command: str | None = None,
     approved: bool = False,
@@ -139,10 +163,10 @@ def exec_risky(
     if not reason.strip():
         raise SafetyError("exec-risky требует непустое обоснование")
     has_rollback = bool(rollback_command and rollback_command.strip())
-    if recovery_contract_json is not None and has_rollback:
-        raise SafetyError("нужно выбрать rollback-команду ИЛИ план восстановления, не оба")
-    if recovery_contract_json is None and not has_rollback:
-        raise SafetyError("exec-risky требует --rollback-command или явный --recovery-contract-file")
+    if sum((has_rollback, recovery_contract_json is not None, rollback_plan_json is not None)) != 1:
+        raise SafetyError("нужно выбрать один источник: rollback-команда, checkpoint или сохранённый план отката")
+    if rollback_plan_json is not None and channel != "local":
+        raise SafetyError("сохранённый план отката поддерживает только --channel local")
     if assessment.risk == Risk.CRITICAL and not allow_critical:
         raise SafetyError("critical command requires --allow-critical plus explicit recovery plan")
     if assessment.risk == Risk.SAFE and not assessment.state_changing:
@@ -161,7 +185,11 @@ def exec_risky(
         else {"mode": "rollback-command", "automatic": False}
     )
     txn_id = ActionRecord.new_id()
-    if recovery_contract_json is not None:
+    saved_rollback = rollback_plan_json is not None
+    durable = recovery_contract_json is not None or saved_rollback
+    if saved_rollback:
+        recovery = prepare_bundle(rollback_plan_json, target=target, txn_id=txn_id, journal=journal)
+    if durable:
         planned = ActionRecord(
             txn_id=txn_id, status=Status.PLANNED, kind=f"{domain}.risky-exec",
             risk=assessment.risk, reason=reason, cwd=str(cwd), target_paths=[target],
@@ -174,6 +202,10 @@ def exec_risky(
             journal.begin_pending(txn_id)
         except OSError as exc:
             raise SafetyError("не удалось зафиксировать план восстановления; действие не запущено") from exc
+    if saved_rollback:
+        load_bundle(journal=journal, txn_id=txn_id, recovery=recovery)
+        if target_state(target, journal) != recovery["target_state"]:
+            raise SafetyError("цель изменилась после подготовки; действие не запущено, барьер сохранён")
 
     def execute_once(args: list[str]) -> dict[str, Any]:
         try:
@@ -202,6 +234,8 @@ def exec_risky(
                 "verify_failed",
                 "verify-команда завершилась с ненулевым кодом",
             )
+        elif saved_rollback and verify_exec.get("stdout_truncated"):
+            verification = failed_verification(expected_state.assertions, "verify_truncated", "вывод проверки усечён")
         else:
             verification = verify_stdout(expected_state.assertions, str(verify_exec.get("stdout", "")))
     else:
@@ -223,6 +257,15 @@ def exec_risky(
         and (receipt_exec is None or receipt_exec.get("returncode") == 0)
     )
     status = Status.DONE if ok else Status.UNEXPECTED
+    if saved_rollback:
+        try:
+            recovery["target_state"] = target_state(target, journal)
+        except SafetyError:
+            recovery["target_state"] = None
+            status = Status.UNEXPECTED
+            verification = failed_verification(expected_state.assertions, "target_observation_failed", "цель после действия недоступна для безопасного наблюдения")
+        if result.get("outcome") == "not_started":
+            status = Status.FAILED
     record = ActionRecord(
         txn_id=txn_id,
         status=status,
@@ -251,8 +294,8 @@ def exec_risky(
     )
     if status == Status.UNEXPECTED:
         journal.block(f"unexpected result after {domain}.risky-exec", txn_id)
-    journal.append(record, durable=recovery_contract_json is not None)
-    if status == Status.DONE and recovery_contract_json is not None and not journal.finish_pending(txn_id):
+    journal.append(record, durable=durable)
+    if status in {Status.DONE, Status.FAILED} and durable and not journal.finish_pending(txn_id):
         record.status = Status.UNEXPECTED
         record.verify_result["recovery_barrier_error"] = True
         journal.block("не удалось завершить барьер проверки восстановления", txn_id)
