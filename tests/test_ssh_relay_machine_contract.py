@@ -101,6 +101,7 @@ class SshRelayMachineContractTests(unittest.TestCase):
         receipt_path: str | None = None,
         verify_stdout: str = '{"service":"active"}',
         main_updates: dict | None = None,
+        verify_updates: dict | None = None,
     ):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -123,6 +124,7 @@ class SshRelayMachineContractTests(unittest.TestCase):
                     "stderr": "LOCAL_SECRET_STDERR",
                 }
             payload = verify_payload(mode=mode, stdout=verify_stdout)
+            payload.update(verify_updates or {})
             return {
                 "launched": True,
                 "returncode": 0,
@@ -152,6 +154,53 @@ class SshRelayMachineContractTests(unittest.TestCase):
                 allow_critical=False,
             )
         return record, journal, calls
+
+    def test_verify_endpoint_must_match_main(self):
+        for mode in ("exec", "sudo-exec"):
+            for field, value in (("remote_host", "198.51.100.99"), ("remote_port", 2222), ("remote_user", "another-user")):
+                with self.subTest(mode=mode, field=field):
+                    record, journal, calls = self._run_case(
+                        lambda tx: risky_payload("succeeded", tx, mode=mode),
+                        mode=mode,
+                        receipt_path="/var/lib/agent-safe/changes.jsonl",
+                        verify_updates={field: value},
+                    )
+                    self.assertEqual("unexpected", record.status.value)
+                    self.assertFalse(record.verification_complete)
+                    self.assertEqual("verify_relay_endpoint_mismatch", record.verify_result["verify_contract_error"])
+                    self.assertTrue(journal.is_blocked())
+                    self.assertEqual(2, len(calls))
+                    self.assertEqual(1, sum("--risky" in call for call in calls))
+
+    def test_malformed_endpoint_is_rejected(self):
+        changes = [
+            {"remote_host": None}, {"remote_host": ""}, {"remote_host": 123},
+            {"remote_user": None}, {"remote_user": " "},
+            {"remote_port": True}, {"remote_port": "22"}, {"remote_port": None},
+            {"remote_port": 0}, {"remote_port": 65536},
+        ]
+        for phase in ("main_updates", "verify_updates"):
+            for change in changes:
+                with self.subTest(phase=phase, change=change):
+                    record, journal, calls = self._run_case(
+                        lambda tx: risky_payload("succeeded", tx), **{phase: change},
+                    )
+                    self.assertEqual("unexpected", record.status.value)
+                    self.assertTrue(journal.is_blocked())
+                    summary = record.metadata["relay" if phase == "main_updates" else "verify_relay"]
+                    self.assertEqual("relay_machine_endpoint_invalid", summary["contract_error"])
+                    self.assertEqual(1, sum("--risky" in call for call in calls))
+
+    def test_proven_not_started_does_not_require_endpoint(self):
+        def not_started(tx):
+            data = risky_payload("not_started", tx, receipt_status="not_attempted")
+            for name in ("remote_host", "remote_port", "remote_user"):
+                data.pop(name)
+            return data
+        record, journal, calls = self._run_case(not_started)
+        self.assertEqual("failed", record.status.value)
+        self.assertFalse(journal.is_blocked())
+        self.assertEqual(1, len(calls))
 
     def test_malformed_machine_fields_enter_recovery_without_retry(self):
         for updates in (

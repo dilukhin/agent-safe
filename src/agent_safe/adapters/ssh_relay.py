@@ -136,6 +136,20 @@ def _is_uuid(value: object) -> bool:
     return True
 
 
+def _endpoint(payload: dict[str, Any]) -> tuple[str, int, str] | None:
+    """Точный адрес из машинного ответа, без догадок по host_label."""
+    host = payload.get("remote_host")
+    port = payload.get("remote_port")
+    user = payload.get("remote_user")
+    if not isinstance(host, str) or not host.strip() or "\x00" in host:
+        return None
+    if type(port) is not int or not 1 <= port <= 65535:
+        return None
+    if not isinstance(user, str) or not user.strip() or "\x00" in user:
+        return None
+    return host, port, user
+
+
 def _parse_machine_payload(
     run: dict[str, Any],
     *,
@@ -167,6 +181,9 @@ def _parse_machine_payload(
     operation_status = payload.get("operation_status")
     if not isinstance(operation_status, str) or operation_status not in _MACHINE_EXIT_CODES:
         return payload, "relay_machine_unknown_operation_status"
+    # При доказанном незапуске сведения об удалённой стороне могут отсутствовать.
+    if operation_status != "not_started" and _endpoint(payload) is None:
+        return payload, "relay_machine_endpoint_invalid"
     if type(run.get("returncode")) is not int or run.get("returncode") != _MACHINE_EXIT_CODES[operation_status]:
         return payload, "relay_machine_process_code_mismatch"
 
@@ -423,6 +440,13 @@ def ssh_relay_risky(
             transaction_id=None,
             relay_name=relay_name,
         )
+        if (
+            verify_contract_error is None
+            and verify_payload.get("operation_status") == "succeeded"
+            and payload is not None
+            and _endpoint(payload) != _endpoint(verify_payload)
+        ):
+            verify_contract_error = "verify_relay_endpoint_mismatch"
         if verify_contract_error:
             verification = failed_verification(
                 expected.assertions,
