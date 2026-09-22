@@ -138,6 +138,27 @@ safe recover --txn-id SOURCE --plan-file SAVED_PLAN_JSON --reason RECOVERY_REASO
 попытку так повторить нельзя. Ошибка итоговой записи оставляет ACTIVE и блокировку.
 Удалять эти свидетельства без диагностики и отдельного плана восстановления нельзя.
 
+### Внутренний managed-вход
+
+Доверенный код приложения может вызвать непубличный `_recover_managed` с владельцем,
+реализующим protocol из `core.managed_process`. Публичной managed-команды и новых CLI-флагов
+нет. Ручной `recover --approved` сохраняет прежнее поведение и не может подтвердить
+managed process или verify.
+
+Владелец сначала подтверждает отдельный `RecoveryAdmission` на исходную транзакцию,
+manifest, journal, блокировку и `ACTIVE.json`. После этого process и verify получают
+разные bindings/call_id и отдельно проходят `ExecutionPort.request` и `consume`.
+`HostPort` и штатное `approve_once` остаются только у opencode_permissions. Отказ до
+process не запускает его; отказ verify после process сохраняет факт восстановления,
+блокировку и запрещает повтор process. Все разрешения одноразовые и не возвращаются
+после ошибки создания процесса, failure или unknown.
+
+Текущая проверка использует только тестовую имитацию владельца. PR
+opencode_permissions #37 не предоставляет поддержанный installable package, поэтому
+agent-safe не загружает библиотеку из соседнего checkout, cwd или `PYTHONPATH` и не
+добавляет production dependency. Реальный OpenCode host bridge и доставка точной версии
+модулей должны быть реализованы и проверены отдельно до включения managed-пути.
+
 ## Границы гарантий
 
 Сохранены байты объявленных зависимостей; полнота зависимостей и безопасность скрипта
