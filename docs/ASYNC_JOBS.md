@@ -171,3 +171,41 @@ Lifecycle contract не добавляет необходимости сохра
 Существующие JSONL receipts вида `status=done` остаются читаемыми. Новые поля являются дополнительными, существующие обязательные поля не переименовываются и не удаляются.
 
 Синхронные `exec`/`sudo-exec` продолжают использовать прежний контракт. Lifecycle statuses применяются только к операциям, чей запуск и завершение разделены во времени.
+
+## Длительные root-операции через sudo-job 0.12
+
+Для `ssh_relay sudo-job` используется отдельный адаптер `agent-safe`. Он не
+переиспользует синхронный `ssh-relay-risky`: подтверждение запуска не считается
+завершением.
+
+До `start` caller обязан задать канонические `job_id` и `transaction_id`, точный
+`host-label`, verified identity, ожидаемое состояние, read-only verify и план
+восстановления. Agent-safe создаёт durable локальный барьер **до** запуска
+`ssh_relay`. Полный текст root-команды, sudo-пароль и stdout/stderr не сохраняются
+в локальном журнале; сохраняются UUID и SHA-256 команды.
+
+Переходы:
+
+```text
+not_started -> failed, временный барьер снимается
+running     -> blocked, повтор start запрещён
+unknown     -> unexpected, повтор start запрещён
+failed      -> unexpected, требуется диагностика/восстановление
+succeeded + accounting=recorded + verify PASS -> done, барьер снимается
+succeeded + accounting failure/verify failure -> unexpected
+```
+
+`status` и `wait` разрешены во время блокировки только для той же
+`transaction_id`/`job_id`/`command_sha256`. После reconnect допускается новая
+daemon instance/generation, но endpoint и host key должны совпасть с исходной
+целью. Иная цель отвергается до control-вызова.
+
+`tail` не пишет полученный журнал в `.agent-safety`; вывод может содержать
+чувствительные данные. `stop` — отдельная изменяющая операция с отдельным
+разрешением; даже подтверждённый запрос SIGTERM не считается успешным
+завершением исходной операции и не снимает safety-барьер.
+
+CLI-флаг `--approved` сохраняет существующую ручную границу agent-safe и сам по
+себе не является доказательством разрешения для OpenCode. Интеграция
+`opencode_permissions` должна привязывать разрешение к точной операции и не
+считать caller-controlled `--approved` или путь identity-файла authority.
