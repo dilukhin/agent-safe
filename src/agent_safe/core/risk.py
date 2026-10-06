@@ -9,7 +9,8 @@ from .models import Assessment, Knowledge, Predictability, Reversibility, Risk
 READ_ONLY_VERBS = {
     "cat", "type", "more", "less", "head", "tail", "ls", "dir", "pwd", "whoami", "hostname",
     "get", "show", "list", "describe", "status", "diff", "log", "grep", "find", "where",
-    "test-path", "select", "explain", "plan", "dry-run", "whatif", "version", "--version", "help", "--help", "-h"
+    "test-path", "select", "explain", "plan", "dry-run", "whatif", "version", "--version", "help", "--help", "-h",
+    "dpkg-query"
 }
 
 STATE_CHANGING_VERBS = {

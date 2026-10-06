@@ -15,6 +15,11 @@ class RiskTests(unittest.TestCase):
         self.assertEqual(a.risk, Risk.CRITICAL)
         self.assertTrue(a.state_changing)
 
+    def test_dpkg_query_is_read_only(self):
+        assessment = assess_command("dpkg-query -W -f='{\"installed\":true}' hello")
+        self.assertEqual(Risk.SAFE, assessment.risk)
+        self.assertFalse(assessment.state_changing)
+
     def test_unknown_is_high_attention(self):
         a = assess_command("frobnicate resource-123")
         self.assertEqual(a.risk, Risk.UNKNOWN)
