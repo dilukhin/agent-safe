@@ -14,7 +14,7 @@ JOB = "11111111-1111-4111-8111-111111111111"
 TX = "22222222-2222-4222-8222-222222222222"
 COMMAND = "apt-get install -y hello"
 COMMAND_HASH = hashlib.sha256(COMMAND.encode("utf-8")).hexdigest()
-VERIFY = "dpkg-query -W -f='{\\\"installed\\\":true}' hello"
+VERIFY = "dpkg-query -W -f='{\"installed\":true}' hello"
 TARGET = {
     "remote_host": "198.51.100.42",
     "remote_port": 22,
