@@ -203,6 +203,7 @@ def _parse(
     command_hash: str,
     current_target: dict[str, Any],
     expected_identity: dict[str, Any],
+    expected_start_witness: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not run.get("launched"):
         return None, "sudo_job_launcher_not_started"
@@ -240,15 +241,14 @@ def _parse(
     if state == "running" and start is None:
         return payload, "sudo_job_start_witness_missing"
     if state in {"succeeded", "failed"}:
-        if start is None:
-            return payload, "sudo_job_start_witness_missing"
         code = payload.get("exit_code")
         if type(code) is not int or not 0 <= code <= 255 or (state == "succeeded") != (code == 0):
             return payload, "sudo_job_exit_invalid"
         if completion is not None:
             if not isinstance(completion, dict):
                 return payload, "sudo_job_completion_witness_invalid"
-            if any(completion.get(field) != start.get(field) for field in ("boot_id", "unit", "invocation_id")):
+            known_start = expected_start_witness or start
+            if known_start is not None and any(completion.get(field) != known_start.get(field) for field in ("boot_id", "unit", "invocation_id")):
                 return payload, "sudo_job_completion_launch_mismatch"
             if not _witness_valid(
                 completion, phase="completion", job_id=job_id, transaction_id=transaction_id,
@@ -549,6 +549,7 @@ def observe(
     payload, error = _parse(
         run, operation=operation, job_id=job_id, transaction_id=transaction_id,
         command_hash=command_hash, current_target=target, expected_identity=identity,
+        expected_start_witness=previous.get("metadata", {}).get("sudo_job", {}).get("start_witness"),
     )
     state = payload.get("state") if payload and error is None else "unknown"
     verification = None

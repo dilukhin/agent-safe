@@ -154,7 +154,9 @@ class SudoJobLifecycleTests(unittest.TestCase):
             "stdout": '{"installed":true}', "stderr": "", "error_code": None, "error_stage": None,
             "verified_identity": IDENTITY,
         }
-        control = self.run_for(payload("status", "succeeded"))
+        value = payload("status", "succeeded")
+        value.pop("start_witness")  # Фактический relay возвращает самостоятельный completion.
+        control = self.run_for(value)
         verify_run = {"launched": True, "returncode": 0, "stdout": json.dumps(verify_payload), "stderr": ""}
         with patch.object(sudo_job, "_run", return_value=control), patch.object(
             sudo_job, "_run_machine", return_value=verify_run
