@@ -118,6 +118,20 @@ class SudoJobLifecycleTests(unittest.TestCase):
         self.assertNotIn("SECRET_LOCAL_STDERR", text)
         self.assertIn(COMMAND_HASH, text)
 
+    def test_final_journal_write_failure_preserves_barrier(self):
+        original_append = self.journal.append
+        calls = []
+        def append(record, **kwargs):
+            calls.append(record)
+            if len(calls) == 2:
+                raise OSError("synthetic disk full after response")
+            original_append(record, **kwargs)
+        with patch.object(self.journal, "append", side_effect=append):
+            with self.assertRaises(OSError):
+                self.start(payload("start", "not_started"))
+        self.assertTrue(self.journal.is_blocked())
+        self.assertEqual(JOB, self.journal.find(TX)["command"]["job_id"])
+
     def test_proven_not_started_clears_barrier(self):
         record = self.start(payload("start", "not_started"))
         self.assertEqual("failed", record.status.value)
@@ -127,7 +141,7 @@ class SudoJobLifecycleTests(unittest.TestCase):
         record = self.start(payload("start", "unknown"))
         self.assertEqual("unexpected", record.status.value)
         self.assertTrue(self.journal.is_blocked())
-        self.assertEqual(1, len(self.journal.records()))
+        self.assertEqual(2, len(self.journal.records()))
 
     def test_succeeded_observation_verifies_and_clears_barrier(self):
         self.start(payload("start", "running"))
@@ -138,6 +152,7 @@ class SudoJobLifecycleTests(unittest.TestCase):
             "sudo": False, "risky": False, "command_status": "succeeded", "command_exit_code": 0,
             "receipt_status": "not_requested", "partial_success": False,
             "stdout": '{"installed":true}', "stderr": "", "error_code": None, "error_stage": None,
+            "verified_identity": IDENTITY,
         }
         control = self.run_for(payload("status", "succeeded"))
         verify_run = {"launched": True, "returncode": 0, "stdout": json.dumps(verify_payload), "stderr": ""}
@@ -153,6 +168,75 @@ class SudoJobLifecycleTests(unittest.TestCase):
         self.assertEqual("done", record.status.value)
         self.assertFalse(self.journal.is_blocked())
         self.assertTrue(record.verification_complete)
+
+    def test_correlation_is_durable_before_launch_and_survives_client_crash(self):
+        def crash(*_args):
+            previous = self.journal.find(TX)
+            self.assertEqual(JOB, previous["command"]["job_id"])
+            self.assertEqual(COMMAND_HASH, previous["command"]["remote_command_sha256"])
+            self.assertEqual(TARGET, previous["metadata"]["original_target"])
+            self.assertTrue(self.journal.is_blocked())
+            raise SystemExit("synthetic client crash")
+        with patch.object(sudo_job, "_run", side_effect=crash):
+            with self.assertRaises(SystemExit):
+                sudo_job.start(
+                    "ssh_relay", COMMAND, journal=self.journal, host_label="prod", relay_name="prod",
+                    job_id=JOB, transaction_id=TX, expected_identity_file=str(self.identity),
+                    expected_state_json='{"assertions":{"installed":true}}',
+                    verify_remote_command=VERIFY, recovery_plan="ручная диагностика", reason="проверка", approved=True,
+                )
+        self.assertIsNotNone(Journal(self.root).find(TX))
+        self.assertTrue(Journal(self.root).is_blocked())
+
+    def test_failed_prelaunch_journal_write_does_not_start(self):
+        with patch.object(self.journal, "append", side_effect=OSError("synthetic disk full")), patch.object(sudo_job, "_run") as run:
+            with self.assertRaises(OSError):
+                self.start(payload("start", "running"))
+        run.assert_not_called()
+        self.assertTrue(self.journal.is_blocked())
+
+    def test_verify_requires_exact_host_key_and_passes_pin_without_risky(self):
+        from agent_safe.core.models import Status
+        self.start(payload("start", "running"))
+        verify_payload = {
+            "schema_version": 1, "tool": "ssh_relay", "tool_version": "0.12.0",
+            "action": "exec", "operation_status": "succeeded", "session": "prod",
+            "remote_host": TARGET["remote_host"], "remote_port": 22, "remote_user": "donpedro",
+            "sudo": False, "risky": False, "command_status": "succeeded", "command_exit_code": 0,
+            "receipt_status": "not_requested", "partial_success": False,
+            "stdout": '{"installed":true}', "stderr": "", "error_code": None, "error_stage": None,
+            "verified_identity": {**IDENTITY, "remote_host_key_sha256": "SHA256:" + "B" * 43},
+        }
+        def verify_run(args, *_args, **_kwargs):
+            self.assertIn("--require-verified-identity", args)
+            self.assertIn(IDENTITY["remote_host_key_sha256"], args)
+            self.assertNotIn("--risky", args)
+            return {"launched": True, "returncode": 0, "stdout": json.dumps(verify_payload), "stderr": ""}
+        with patch.object(sudo_job, "_run", return_value=self.run_for(payload("status", "succeeded"))), patch.object(sudo_job, "_run_machine", side_effect=verify_run):
+            record = sudo_job.observe(
+                "ssh_relay", journal=self.journal, operation="status", relay_name="prod",
+                job_id=JOB, transaction_id=TX, command_hash=COMMAND_HASH,
+                expected_identity_file=str(self.identity), verify_remote_command=VERIFY, reason="verify",
+            )
+        self.assertEqual(Status.UNEXPECTED, record.status)
+        self.assertTrue(self.journal.is_blocked())
+
+    def test_completion_for_another_systemd_launch_is_rejected(self):
+        self.start(payload("start", "running"))
+        value = payload("status", "succeeded")
+        proof = value["completion_witness"]
+        proof["invocation_id"] = "b" * 32
+        original = {k: v for k, v in proof.items() if k != "witness_sha256"}
+        proof["witness_sha256"] = hashlib.sha256(json.dumps(original, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        with patch.object(sudo_job, "_run", return_value=self.run_for(value)), patch.object(sudo_job, "_run_machine") as verify_run:
+            record = sudo_job.observe(
+                "ssh_relay", journal=self.journal, operation="status", relay_name="prod",
+                job_id=JOB, transaction_id=TX, command_hash=COMMAND_HASH,
+                expected_identity_file=str(self.identity), verify_remote_command=VERIFY, reason="proof",
+            )
+        verify_run.assert_not_called()
+        self.assertEqual("unexpected", record.status.value)
+        self.assertTrue(self.journal.is_blocked())
 
     def test_accounting_failure_never_becomes_done(self):
         self.start(payload("start", "running"))

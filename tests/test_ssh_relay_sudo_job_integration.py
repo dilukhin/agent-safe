@@ -26,7 +26,7 @@ from agent_safe.adapters import ssh_relay_sudo_job as sudo_job
 from agent_safe.core.journal import Journal
 
 PASSWORD = "relay-ci-artificial-password-52"
-SOURCE_SHA = "d997b377bf9703db890f3d0f8a4535d19f27997d"
+SOURCE_SHA = "078166e2cf1a7ea6695492373736bcfd29357121"
 
 
 @unittest.skipUnless(

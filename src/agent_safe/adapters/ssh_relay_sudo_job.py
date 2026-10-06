@@ -64,7 +64,11 @@ def _read_identity(path: str | Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SafetyError("verified identity должна быть JSON-объектом")
     if (
-        not isinstance(value.get("remote_host"), str)
+        set(value) != {"schema_version", "trusted_known_hosts", "daemon_instance_id", "connection_generation", "daemon_source_sha", *_TARGET_FIELDS}
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != _SCHEMA
+        or value.get("trusted_known_hosts") is not True
+        or not isinstance(value.get("remote_host"), str)
         or not value["remote_host"]
         or type(value.get("remote_port")) is not int
         or not 1 <= value["remote_port"] <= 65535
@@ -119,7 +123,16 @@ def _witness_valid(
         or witness.get("transaction_id") != transaction_id
         or witness.get("command_sha256") != command_hash
         or witness.get("target") != target
+        or not isinstance(witness.get("boot_id"), str)
+        or witness.get("unit") != "ssh-relay-sudo-" + UUID(job_id).hex + ".service"
+        or not isinstance(witness.get("invocation_id"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", witness["invocation_id"]) is None
     ):
+        return False
+    try:
+        if str(UUID(witness["boot_id"])) != witness["boot_id"]:
+            return False
+    except (ValueError, TypeError, AttributeError):
         return False
     if phase == "completion" and witness.get("exit_code") != exit_code:
         return False
@@ -189,6 +202,7 @@ def _parse(
     transaction_id: str,
     command_hash: str,
     current_target: dict[str, Any],
+    expected_identity: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not run.get("launched"):
         return None, "sudo_job_launcher_not_started"
@@ -214,7 +228,7 @@ def _parse(
     state = payload["state"]
     if state != "not_started":
         identity = payload.get("verified_identity")
-        if not isinstance(identity, dict) or not _same_target(identity, current_target):
+        if identity != expected_identity or not _same_target(identity, current_target):
             return payload, "sudo_job_target_mismatch"
     start = payload.get("start_witness")
     completion = payload.get("completion_witness")
@@ -226,10 +240,16 @@ def _parse(
     if state == "running" and start is None:
         return payload, "sudo_job_start_witness_missing"
     if state in {"succeeded", "failed"}:
+        if start is None:
+            return payload, "sudo_job_start_witness_missing"
         code = payload.get("exit_code")
         if type(code) is not int or not 0 <= code <= 255 or (state == "succeeded") != (code == 0):
             return payload, "sudo_job_exit_invalid"
         if completion is not None:
+            if not isinstance(completion, dict):
+                return payload, "sudo_job_completion_witness_invalid"
+            if any(completion.get(field) != start.get(field) for field in ("boot_id", "unit", "invocation_id")):
+                return payload, "sudo_job_completion_launch_mismatch"
             if not _witness_valid(
                 completion, phase="completion", job_id=job_id, transaction_id=transaction_id,
                 command_hash=command_hash, target=current_target, exit_code=code,
@@ -274,6 +294,7 @@ def _verify(
     *,
     cwd: Path,
     expected_target: dict[str, Any],
+    expected_identity: dict[str, Any],
     assertions: dict[str, Any],
     timeout: int,
 ) -> tuple[VerificationOutcome, dict[str, Any]]:
@@ -281,13 +302,23 @@ def _verify(
     if assessment.state_changing or assessment.risk != Risk.SAFE:
         raise SafetyError("verify-команда sudo-job должна быть read-only")
     args = build_relay_command(relay, command, relay_name=relay_name, relay_mode="exec", machine_json=True)
+    flags = ["--require-verified-identity"]
+    for key, flag in (
+        ("remote_host", "--expected-remote-host"), ("remote_port", "--expected-remote-port"),
+        ("remote_user", "--expected-remote-user"), ("host_key_algorithm", "--expected-host-key-algorithm"),
+        ("remote_host_key_sha256", "--expected-host-key-sha256"),
+        ("daemon_instance_id", "--expected-daemon-instance-id"),
+        ("connection_generation", "--expected-connection-generation"), ("daemon_source_sha", "--expected-daemon-source-sha"),
+    ):
+        flags.extend([flag, str(expected_identity[key])])
+    args[-1:-1] = flags
     run = _run_machine(args, cwd, timeout=timeout)
     payload, error = _parse_machine_payload(
         run, relay_mode="exec", risky=False, transaction_id=None, relay_name=relay_name,
     )
     if error is not None:
         return failed_verification(assertions, error, "verify через ssh_relay не дал согласованный результат"), {"contract_error": error}
-    if payload.get("operation_status") != "succeeded" or _endpoint(payload) != (
+    if payload.get("verified_identity") != expected_identity or payload.get("operation_status") != "succeeded" or _endpoint(payload) != (
         expected_target["remote_host"], expected_target["remote_port"], expected_target["remote_user"]
     ):
         return failed_verification(assertions, "verify_relay_target_or_status", "verify не подтвердил ту же SSH-цель"), {
@@ -374,6 +405,15 @@ def _previous(journal: Journal, transaction_id: str, job_id: str, command_hash: 
     return previous
 
 
+def _save_result(journal: Journal, record: ActionRecord, *, terminal: bool) -> ActionRecord:
+    # Сначала сохраняется полный результат; сбой записи не снимает барьер.
+    journal.append(record, durable=True)
+    if terminal and not journal.finish_pending(record.txn_id):
+        record.status = Status.UNEXPECTED
+        journal.append(record, durable=True)
+    return record
+
+
 def start(
     relay: str,
     remote_command: str,
@@ -426,10 +466,19 @@ def start(
         relay, "start", relay_name=relay_name, job_id=job_id, transaction_id=transaction_id,
         identity_file=expected_identity_file, command_hash=command_hash, remote_command=remote_command,
     )
+    # Эти данные доступны для status даже после аварии клиента до ответа start.
+    pending = _new_record(
+        transaction_id=transaction_id, status=Status.BLOCKED, risk=assessment.risk,
+        reason=reason, cwd=cwd, host_label=host_label, relay_name=relay_name,
+        job_id=job_id, command_hash=command_hash, verify_hash=verify_hash,
+        recovery_hash=recovery_hash, target=target, expected_state=expected.to_dict(),
+        run={"launched": False}, payload=None, contract_error="pending_start",
+    )
+    journal.append(pending, durable=True)
     run = _run(args, cwd, timeout)
     payload, error = _parse(
         run, operation="start", job_id=job_id, transaction_id=transaction_id,
-        command_hash=command_hash, current_target=target,
+        command_hash=command_hash, current_target=target, expected_identity=identity,
     )
     state = payload.get("state") if payload and error is None else "unknown"
     verification = None
@@ -437,13 +486,13 @@ def start(
     status = Status.BLOCKED if state == "running" else Status.UNEXPECTED
 
     if state == "not_started" and error is None:
-        status = Status.FAILED if journal.finish_pending(transaction_id) else Status.UNEXPECTED
+        status = Status.FAILED
     elif state == "succeeded" and error is None and payload.get("accounting_status") == "recorded":
         verification, verify_meta = _verify(
             relay, relay_name, verify_remote_command, cwd=cwd, expected_target=target,
-            assertions=expected.assertions, timeout=timeout,
+            assertions=expected.assertions, timeout=timeout, expected_identity=identity,
         )
-        if verification.successful and journal.finish_pending(transaction_id):
+        if verification.successful:
             status = Status.DONE
 
     record = _new_record(
@@ -453,8 +502,7 @@ def start(
         expected_state=expected.to_dict(), run=run, payload=payload, contract_error=error,
         verification=verification, verify_meta=verify_meta,
     )
-    journal.append(record, durable=True)
-    return record
+    return _save_result(journal, record, terminal=status in {Status.DONE, Status.FAILED})
 
 
 def observe(
@@ -500,7 +548,7 @@ def observe(
     run = _run(args, cwd, local_timeout)
     payload, error = _parse(
         run, operation=operation, job_id=job_id, transaction_id=transaction_id,
-        command_hash=command_hash, current_target=target,
+        command_hash=command_hash, current_target=target, expected_identity=identity,
     )
     state = payload.get("state") if payload and error is None else "unknown"
     verification = None
@@ -511,9 +559,9 @@ def observe(
         assertions = expected_state.get("assertions", {}) if isinstance(expected_state, dict) else {}
         verification, verify_meta = _verify(
             relay, relay_name, verify_remote_command, cwd=cwd, expected_target=target,
-            assertions=assertions, timeout=timeout,
+            assertions=assertions, timeout=timeout, expected_identity=identity,
         )
-        if verification.successful and journal.finish_pending(transaction_id):
+        if verification.successful:
             status = Status.DONE
     record = _new_record(
         transaction_id=transaction_id, status=status, risk=Risk(previous["risk"]), reason=reason, cwd=cwd,
@@ -525,8 +573,7 @@ def observe(
         run=run, payload=payload, contract_error=error,
         verification=verification, verify_meta=verify_meta,
     )
-    journal.append(record, durable=True)
-    return record
+    return _save_result(journal, record, terminal=status == Status.DONE)
 
 
 def tail(
@@ -560,7 +607,7 @@ def tail(
     run = _run(args, cwd, timeout)
     payload, error = _parse(
         run, operation="tail", job_id=job_id, transaction_id=transaction_id,
-        command_hash=command_hash, current_target=target,
+        command_hash=command_hash, current_target=target, expected_identity=identity,
     )
     if error is not None or payload is None:
         raise SafetyError(f"tail не дал подтверждённый результат: {error or 'unknown'}")
@@ -602,7 +649,7 @@ def stop(
     run = _run(args, cwd, timeout)
     payload, error = _parse(
         run, operation="stop", job_id=job_id, transaction_id=transaction_id,
-        command_hash=command_hash, current_target=target,
+        command_hash=command_hash, current_target=target, expected_identity=identity,
     )
     status = Status.BLOCKED if payload and error is None and payload.get("stop_requested") is True else Status.UNEXPECTED
     record = _new_record(
