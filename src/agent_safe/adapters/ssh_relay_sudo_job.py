@@ -549,7 +549,8 @@ def observe(
     payload, error = _parse(
         run, operation=operation, job_id=job_id, transaction_id=transaction_id,
         command_hash=command_hash, current_target=target, expected_identity=identity,
-        expected_start_witness=previous.get("metadata", {}).get("sudo_job", {}).get("start_witness"),
+        expected_start_witness=(previous.get("metadata", {}).get("known_start_witness") or
+                                previous.get("metadata", {}).get("sudo_job", {}).get("start_witness")),
     )
     state = payload.get("state") if payload and error is None else "unknown"
     verification = None
@@ -574,6 +575,10 @@ def observe(
         run=run, payload=payload, contract_error=error,
         verification=verification, verify_meta=verify_meta,
     )
+    known_start = (previous.get("metadata", {}).get("known_start_witness") or
+                   previous.get("metadata", {}).get("sudo_job", {}).get("start_witness"))
+    if isinstance(known_start, dict):
+        record.metadata["known_start_witness"] = known_start
     return _save_result(journal, record, terminal=status == Status.DONE)
 
 

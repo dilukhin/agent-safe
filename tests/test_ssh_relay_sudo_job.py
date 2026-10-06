@@ -225,7 +225,15 @@ class SudoJobLifecycleTests(unittest.TestCase):
 
     def test_completion_for_another_systemd_launch_is_rejected(self):
         self.start(payload("start", "running"))
+        # Неоднозначное промежуточное наблюдение не стирает известный запуск.
+        with patch.object(sudo_job, "_run", return_value=self.run_for(payload("status", "unknown"))):
+            sudo_job.observe(
+                "ssh_relay", journal=self.journal, operation="status", relay_name="prod",
+                job_id=JOB, transaction_id=TX, command_hash=COMMAND_HASH,
+                expected_identity_file=str(self.identity), verify_remote_command=VERIFY, reason="unknown",
+            )
         value = payload("status", "succeeded")
+        value.pop("start_witness")
         proof = value["completion_witness"]
         proof["invocation_id"] = "b" * 32
         original = {k: v for k, v in proof.items() if k != "witness_sha256"}
