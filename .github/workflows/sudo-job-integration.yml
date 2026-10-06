@@ -46,6 +46,7 @@ jobs:
       - name: Выполнить полный жизненный цикл через точный ssh_relay
         env:
           GITHUB_ACTIONS: 'true'
+          AGENT_SAFE_SUDO_JOB_E2E: '1'
           SSH_RELAY_SOURCE_SHA: d997b377bf9703db890f3d0f8a4535d19f27997d
           PYTHONIOENCODING: utf-8
           PYTHONPATH: src

@@ -12,6 +12,9 @@ import unittest
 import uuid
 from pathlib import Path
 
+if os.environ.get("AGENT_SAFE_SUDO_JOB_E2E") != "1":
+    raise unittest.SkipTest("Сквозной sudo-job тест запускается только отдельным workflow")
+
 ROOT = Path(__file__).resolve().parents[1]
 SSH_RELAY = ROOT / "_deps" / "ssh_relay"
 sys.path.insert(0, str(ROOT / "src"))
@@ -27,8 +30,10 @@ SOURCE_SHA = "d997b377bf9703db890f3d0f8a4535d19f27997d"
 
 
 @unittest.skipUnless(
-    os.environ.get("GITHUB_ACTIONS") == "true" and sys.platform == "linux",
-    "Требуется одноразовый GitHub Actions Ubuntu",
+    os.environ.get("AGENT_SAFE_SUDO_JOB_E2E") == "1"
+    and os.environ.get("GITHUB_ACTIONS") == "true"
+    and sys.platform == "linux",
+    "Требуется отдельный одноразовый GitHub Actions Ubuntu",
 )
 class SudoJobCrossRepoIntegration(unittest.TestCase):
     @classmethod
