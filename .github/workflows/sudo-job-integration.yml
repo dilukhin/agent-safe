@@ -1,0 +1,53 @@
+name: Совместная проверка sudo-job
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sudo-job-integration:
+    name: agent-safe → ssh_relay 0.13.0 → sudo/systemd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Получить agent-safe
+        uses: actions/checkout@v6
+
+      - name: Получить точный ssh_relay 0.13.0
+        uses: actions/checkout@v6
+        with:
+          repository: dilukhin/ssh_relay
+          ref: b9b68559c3ceff0a2a9a7762d54d0788a47f879a
+          path: _deps/ssh_relay
+
+      - name: Настроить Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Подготовить одноразовый Ubuntu-стенд
+        run: |
+          python -m pip install paramiko
+          sudo apt-get update -qq
+          sudo apt-get install -y openssh-server
+          sudo apt-get remove -y hello >/dev/null 2>&1 || true
+          sudo mkdir -p /run/sshd
+          sudo useradd -m -s /bin/sh relayci
+          printf 'relayci:relay-ci-artificial-password-52\n' | sudo chpasswd
+          printf 'relayci ALL=(root) PASSWD: ALL\nDefaults:relayci timestamp_timeout=0\n' | sudo tee /etc/sudoers.d/relayci >/dev/null
+          sudo chmod 440 /etc/sudoers.d/relayci
+          sudo visudo -cf /etc/sudoers.d/relayci
+
+      - name: Выполнить полный жизненный цикл через точный ssh_relay
+        env:
+          GITHUB_ACTIONS: 'true'
+          AGENT_SAFE_SUDO_JOB_E2E: '1'
+          SSH_RELAY_SOURCE_SHA: b9b68559c3ceff0a2a9a7762d54d0788a47f879a
+          PYTHONIOENCODING: utf-8
+          PYTHONPATH: src
+        run: python tests/test_ssh_relay_sudo_job_integration.py

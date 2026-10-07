@@ -15,6 +15,7 @@ from .core.rollback import local_journal
 from .adapters.fs import SafetyError, fs_move, fs_trash, redo_record, undo_record
 from .adapters.git import git_checkpoint, git_clean_preview
 from .adapters.ssh_relay import ssh_relay_readonly, ssh_relay_risky
+from .adapters.ssh_relay_sudo_job import observe as ssh_relay_sudo_job_observe, start as ssh_relay_sudo_job_start, stop as ssh_relay_sudo_job_stop, tail as ssh_relay_sudo_job_tail
 from .adapters.system import system_change, system_readonly
 from .adapters.yc import yc_change, yc_readonly
 from .core.checkpoint import checkpoint as make_checkpoint
@@ -279,6 +280,57 @@ def cmd_ssh_relay_risky(args: argparse.Namespace) -> int:
     return 0 if record.status.value == "done" else 3
 
 
+
+def cmd_ssh_relay_sudo_job_start(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    expected_state = _choose_arg(args.expected_state, args.expected_state_file, "expected-state", required=True)
+    record = ssh_relay_sudo_job_start(
+        args.relay, args.remote_command, journal=journal, host_label=args.host_label,
+        relay_name=args.relay_name, job_id=args.job_id, transaction_id=args.transaction_id,
+        expected_identity_file=args.expected_identity_file, expected_state_json=expected_state or "",
+        verify_remote_command=args.verify_remote_command, recovery_plan=args.recovery_plan,
+        reason=args.reason, approved=args.approved, allow_critical=args.allow_critical, timeout=args.timeout,
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_ssh_relay_sudo_job_observe(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = ssh_relay_sudo_job_observe(
+        args.relay, journal=journal, operation=args.sudo_job_action, relay_name=args.relay_name,
+        job_id=args.job_id, transaction_id=args.transaction_id, command_hash=args.command_sha256,
+        expected_identity_file=args.expected_identity_file, verify_remote_command=args.verify_remote_command,
+        reason=args.reason, timeout=args.timeout, wait_timeout=getattr(args, "wait_timeout", 300),
+        poll_interval=getattr(args, "poll_interval", 2),
+    )
+    print_json(record.to_dict())
+    return 0 if record.status.value == "done" else 3
+
+
+def cmd_ssh_relay_sudo_job_tail(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    payload = ssh_relay_sudo_job_tail(
+        args.relay, journal=journal, relay_name=args.relay_name, job_id=args.job_id,
+        transaction_id=args.transaction_id, command_hash=args.command_sha256,
+        expected_identity_file=args.expected_identity_file, stream=args.stream,
+        max_bytes=args.max_bytes, timeout=args.timeout,
+    )
+    print_json(payload)
+    return 0
+
+
+def cmd_ssh_relay_sudo_job_stop(args: argparse.Namespace) -> int:
+    journal = Journal(Path(args.root) if args.root else None)
+    record = ssh_relay_sudo_job_stop(
+        args.relay, journal=journal, relay_name=args.relay_name, job_id=args.job_id,
+        transaction_id=args.transaction_id, command_hash=args.command_sha256,
+        expected_identity_file=args.expected_identity_file, reason=args.reason,
+        approved=args.approved, timeout=args.timeout,
+    )
+    print_json(record.to_dict())
+    return 3
+
 def cmd_yc_readonly(args: argparse.Namespace) -> int:
     journal = Journal(Path(args.root) if args.root else None)
     record = yc_readonly(_remainder(args.yc_args), journal=journal, reason=args.reason)
@@ -526,6 +578,64 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--approved", action="store_true")
     p.add_argument("--allow-critical", action="store_true")
     p.set_defaults(func=cmd_ssh_relay_risky)
+
+    p = sub.add_parser("ssh-relay-sudo-job-start", help="Запустить одну подтверждённую длительную root-операцию через ssh_relay")
+    p.add_argument("--relay", required=True)
+    p.add_argument("--relay-name", required=True)
+    p.add_argument("--host-label", required=True)
+    p.add_argument("--job-id", required=True)
+    p.add_argument("--transaction-id", required=True)
+    p.add_argument("--expected-identity-file", required=True)
+    p.add_argument("--remote-command", required=True)
+    p.add_argument("--expected-state")
+    p.add_argument("--expected-state-file")
+    p.add_argument("--verify-remote-command", required=True)
+    p.add_argument("--recovery-plan", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--allow-critical", action="store_true")
+    p.add_argument("--timeout", type=int, default=120)
+    p.set_defaults(func=cmd_ssh_relay_sudo_job_start)
+
+    for action in ("status", "wait"):
+        p = sub.add_parser(f"ssh-relay-sudo-job-{action}", help=f"Проверить длительную root-операцию через ssh_relay: {action}")
+        p.add_argument("--relay", required=True)
+        p.add_argument("--relay-name", required=True)
+        p.add_argument("--job-id", required=True)
+        p.add_argument("--transaction-id", required=True)
+        p.add_argument("--command-sha256", required=True)
+        p.add_argument("--expected-identity-file", required=True)
+        p.add_argument("--verify-remote-command", required=True)
+        p.add_argument("--reason", required=True)
+        p.add_argument("--timeout", type=int, default=120)
+        if action == "wait":
+            p.add_argument("--wait-timeout", type=int, default=300)
+            p.add_argument("--poll-interval", type=int, default=2)
+        p.set_defaults(func=cmd_ssh_relay_sudo_job_observe, sudo_job_action=action)
+
+    p = sub.add_parser("ssh-relay-sudo-job-tail", help="Прочитать ограниченный хвост журнала sudo-job")
+    p.add_argument("--relay", required=True)
+    p.add_argument("--relay-name", required=True)
+    p.add_argument("--job-id", required=True)
+    p.add_argument("--transaction-id", required=True)
+    p.add_argument("--command-sha256", required=True)
+    p.add_argument("--expected-identity-file", required=True)
+    p.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
+    p.add_argument("--max-bytes", type=int, default=16384)
+    p.add_argument("--timeout", type=int, default=120)
+    p.set_defaults(func=cmd_ssh_relay_sudo_job_tail)
+
+    p = sub.add_parser("ssh-relay-sudo-job-stop", help="Запросить мягкую остановку sudo-job отдельным разрешённым действием")
+    p.add_argument("--relay", required=True)
+    p.add_argument("--relay-name", required=True)
+    p.add_argument("--job-id", required=True)
+    p.add_argument("--transaction-id", required=True)
+    p.add_argument("--command-sha256", required=True)
+    p.add_argument("--expected-identity-file", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--approved", action="store_true")
+    p.add_argument("--timeout", type=int, default=120)
+    p.set_defaults(func=cmd_ssh_relay_sudo_job_stop)
 
     p = sub.add_parser("yc-readonly", help="Run read-only yc command")
     p.add_argument("--reason", default="read-only yc inspection")
